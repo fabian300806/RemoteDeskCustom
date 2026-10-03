@@ -401,6 +401,22 @@ struct FsServerData {
     deletion_events: Vec<FsDeletionEvent>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct GitHubReleaseInfo {
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    published_at: String,
+    #[serde(default)]
+    download_url: String,
+    #[serde(default)]
+    asset_name: String,
+}
+
 enum ScanMessage {
     Found(Device),
     Progress(usize),
@@ -537,6 +553,15 @@ struct LanternApp {
     fs_deletion_receiver: Option<Receiver<Result<Vec<FsDeletionEvent>, String>>>,
     #[allow(dead_code)]
     fs_show_enable_audit_modal: bool,
+
+    // Sistema de Auto-Actualización vía GitHub
+    updater_checking: bool,
+    updater_available_release: Option<GitHubReleaseInfo>,
+    updater_downloading: bool,
+    updater_show_modal: bool,
+    updater_status_msg: Option<(String, Color32)>,
+    updater_receiver: Option<Receiver<Result<Option<GitHubReleaseInfo>, String>>>,
+    updater_install_receiver: Option<Receiver<Result<(), String>>>,
 
     // Modales Servidor de Archivos
     fs_show_create_snapshot_modal: bool,
@@ -732,6 +757,13 @@ impl Default for LanternApp {
             fs_selected_deletion: None,
             fs_deletion_receiver: None,
             fs_show_enable_audit_modal: false,
+            updater_checking: false,
+            updater_available_release: None,
+            updater_downloading: false,
+            updater_show_modal: false,
+            updater_status_msg: None,
+            updater_receiver: None,
+            updater_install_receiver: None,
             fs_show_create_snapshot_modal: false,
             fs_create_snapshot_drive: "D:".to_string(),
             fs_show_restore_modal: false,
@@ -1242,6 +1274,71 @@ impl LanternApp {
         });
     }
 
+    fn check_for_updates(&mut self) {
+        if self.updater_checking { return; }
+        self.updater_checking = true;
+        self.updater_status_msg = None;
+        let (tx, rx) = mpsc::channel();
+        self.updater_receiver = Some(rx);
+        let owner = "fabian300806".to_string();
+        let repo = "RemoteDeskCustom".to_string();
+        let current_ver = env!("CARGO_PKG_VERSION").to_string();
+
+        thread::spawn(move || {
+            let res = check_github_release_sync(&owner, &repo, &current_ver);
+            let _ = tx.send(res);
+        });
+    }
+
+    fn poll_updater(&mut self, ctx: &egui::Context) {
+        let mut update_found = None;
+        if let Some(rx) = &self.updater_receiver {
+            if let Ok(res) = rx.try_recv() {
+                update_found = Some(res);
+            }
+        }
+        if let Some(res) = update_found {
+            self.updater_checking = false;
+            self.updater_receiver = None;
+            match res {
+                Ok(Some(release)) => {
+                    self.updater_available_release = Some(release.clone());
+                    self.updater_show_modal = true;
+                    self.notify(&format!("¡Nueva versión {} disponible!", release.tag_name), SUCCESS);
+                    self.add_log("Actualizador", &format!("Detectada nueva versión {} en GitHub", release.tag_name), SUCCESS);
+                }
+                Ok(None) => {
+                    // Está al día
+                }
+                Err(e) => {
+                    self.add_log("Actualizador", &format!("Error al verificar actualizaciones: {}", e), DANGER);
+                }
+            }
+        }
+
+        let mut install_result = None;
+        if let Some(rx) = &self.updater_install_receiver {
+            if let Ok(res) = rx.try_recv() {
+                install_result = Some(res);
+            }
+        }
+        if let Some(res) = install_result {
+            self.updater_downloading = false;
+            self.updater_install_receiver = None;
+            match res {
+                Ok(_) => {
+                    self.notify("Actualización descargada. Reiniciando...", SUCCESS);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(e) => {
+                    self.updater_status_msg = Some((format!("Error al actualizar: {}", e), DANGER));
+                    self.notify(&format!("Error en actualización: {}", e), DANGER);
+                    self.add_log("Actualizador", &format!("Fallo en actualización: {}", e), DANGER);
+                }
+            }
+        }
+    }
+
     fn sort_devices(&mut self) {
         let dir = self.sort_direction;
         let col = self.sort_column;
@@ -1367,6 +1464,31 @@ impl LanternApp {
                 // Indicadores y controles en el lado derecho
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(20.0);
+
+                    // Botón de Actualizaciones GitHub
+                    if let Some(rel) = &self.updater_available_release {
+                        if ui.add(
+                            egui::Button::new(RichText::new(format!("🚀 Actualizar a {}", rel.tag_name)).size(10.5).strong().color(Color32::BLACK))
+                                .fill(ACCENT)
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(0.0, 26.0))
+                        ).on_hover_text("Nueva versión disponible. Clic para ver novedades y actualizar.").clicked() {
+                            self.updater_show_modal = true;
+                        }
+                    } else {
+                        let btn_txt = if self.updater_checking { "⏳ Buscando..." } else { "🔄 Actualizaciones" };
+                        if ui.add_enabled(!self.updater_checking,
+                            egui::Button::new(RichText::new(btn_txt).size(10.0).color(TEXT_SEC))
+                                .fill(SURFACE_2)
+                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(0.0, 24.0))
+                        ).on_hover_text("Buscar nuevas versiones en GitHub").clicked() {
+                            self.check_for_updates();
+                        }
+                    }
+
+                    ui.add_space(10.0);
 
                     // Indicador de Licencia
                     if self.license.is_some() {
@@ -8962,6 +9084,155 @@ impl LanternApp {
                 ui.add_space(40.0);
             });
     }
+
+    fn ui_updater_modal(&mut self, ctx: &egui::Context) {
+        if !self.updater_show_modal {
+            return;
+        }
+
+        let mut close = false;
+        let mut do_download = false;
+        let current_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let rel_opt = self.updater_available_release.clone();
+
+        egui::Window::new("🚀 Actualización de Sistema — ili Enterprise NET")
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .default_size(Vec2::new(480.0, 360.0))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(
+                egui::Frame::none()
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, BORDER_LT))
+                    .rounding(Rounding::same(10.0))
+                    .inner_margin(Margin::same(18.0))
+            )
+            .show(ctx, |ui| {
+                if let Some(rel) = rel_opt {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🚀").size(24.0));
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("¡Nueva Versión Disponible en GitHub!").size(14.5).strong().color(TEXT_PRI));
+                            ui.label(RichText::new("Una actualización lista para descargar e instalar automáticamente.").size(10.5).color(TEXT_DIM));
+                        });
+                    });
+
+                    ui.add_space(14.0);
+
+                    // Tarjeta comparativa de Versiones
+                    egui::Frame::none()
+                        .fill(SURFACE_1)
+                        .stroke(Stroke::new(1.0_f32, BORDER))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(14.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("VERSIÓN ACTUAL").size(9.5).strong().color(TEXT_DIM));
+                                    badge(ui, &current_ver, SURFACE_2, TEXT_SEC);
+                                });
+                                ui.add_space(20.0);
+                                ui.label(RichText::new("➔").size(16.0).color(ACCENT));
+                                ui.add_space(20.0);
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("NUEVA VERSIÓN").size(9.5).strong().color(TEXT_DIM));
+                                    badge(ui, &rel.tag_name, Color32::from_rgba_unmultiplied(56, 189, 248, 30), ACCENT);
+                                });
+                                if !rel.published_at.is_empty() {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let pub_short = if rel.published_at.len() >= 10 { &rel.published_at[..10] } else { &rel.published_at };
+                                        ui.label(RichText::new(format!("Publicado: {}", pub_short)).size(10.0).color(TEXT_DIM));
+                                    });
+                                }
+                            });
+                        });
+
+                    ui.add_space(12.0);
+
+                    // Notas de la versión
+                    ui.label(RichText::new("Novedades y Cambios:").size(11.0).strong().color(TEXT_PRI));
+                    egui::Frame::none()
+                        .fill(SURFACE_2)
+                        .stroke(Stroke::new(1.0_f32, BORDER))
+                        .rounding(Rounding::same(6.0))
+                        .inner_margin(Margin::same(10.0))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let notes = if rel.body.trim().is_empty() {
+                                    "Mejoras de rendimiento, estabilidad y nuevas funciones integradas."
+                                } else {
+                                    rel.body.as_str()
+                                };
+                                ui.label(RichText::new(notes).size(11.0).color(TEXT_SEC));
+                            });
+                        });
+
+                    if let Some((msg, col)) = &self.updater_status_msg {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(msg).size(10.5).color(*col));
+                    }
+
+                    ui.add_space(16.0);
+
+                    // Botones de acción
+                    if self.updater_downloading {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Descargando actualización e iniciando instalador automático...").size(11.0).color(ACCENT));
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            if ui.add(
+                                egui::Button::new(RichText::new("Recordar más tarde").size(11.0).color(TEXT_SEC))
+                                    .fill(SURFACE_2)
+                                    .stroke(Stroke::new(1.0_f32, BORDER))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(140.0, 30.0))
+                            ).clicked() {
+                                close = true;
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(
+                                    egui::Button::new(RichText::new("✔ Sí, Actualizar Ahora").size(11.5).strong().color(Color32::BLACK))
+                                        .fill(ACCENT)
+                                        .rounding(Rounding::same(6.0))
+                                        .min_size(Vec2::new(180.0, 30.0))
+                                ).clicked() {
+                                    do_download = true;
+                                }
+                            });
+                        });
+                    }
+                } else {
+                    ui.label("Buscando información de versión...");
+                    if ui.button("Cerrar").clicked() {
+                        close = true;
+                    }
+                }
+            });
+
+        if do_download {
+            if let Some(rel) = &self.updater_available_release {
+                let dl_url = rel.download_url.clone();
+                self.updater_downloading = true;
+                self.updater_status_msg = Some(("Descargando actualización desde GitHub...".to_string(), ACCENT));
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.updater_install_receiver = Some(rx);
+                thread::spawn(move || {
+                    let res = apply_github_update_sync(&dl_url);
+                    let _ = tx.send(res);
+                });
+            }
+        }
+
+        if close {
+            self.updater_show_modal = false;
+        }
+    }
 }
 
 // ── eframe::App Implementation ────────────────────────────────────────────────
@@ -8980,8 +9251,9 @@ impl eframe::App for LanternApp {
         self.poll_scan();
         self.poll_ad();
         self.poll_fs();
+        self.poll_updater(ctx);
         // Redibujar frecuentemente al escanear, sincronizar AD / Servidor de Archivos, o cada 2s para la notificación
-        if self.scanning || self.ad_loading || self.fs_loading {
+        if self.scanning || self.ad_loading || self.fs_loading || self.updater_checking || self.updater_downloading {
             ctx.request_repaint_after(Duration::from_millis(60));
         } else if self.notification.is_some() {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -9101,6 +9373,8 @@ impl eframe::App for LanternApp {
         self.ui_ad_modals(ctx);
         // Renderizar Modales del Servidor de Archivos
         self.ui_fs_modals(ctx);
+        // Renderizar Modal de Auto-Actualización GitHub
+        self.ui_updater_modal(ctx);
     }
 }
 
@@ -11939,6 +12213,135 @@ fn chrono_now_string() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, s)
 }
 
+fn check_github_release_sync(owner: &str, repo: &str, current_ver: &str) -> Result<Option<GitHubReleaseInfo>, String> {
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$owner = '{}'
+$repo = '{}'
+$current = '{}'.Trim().TrimStart('v')
+
+try {{
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $headers = @{{ 'User-Agent' = 'lantern-updater' }}
+
+    $ghPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe"
+    if (Test-Path $ghPath) {{
+        $tok = (& $ghPath auth token 2>$null)
+        if ($tok -and $tok.Trim() -ne '') {{
+            $headers['Authorization'] = "Bearer $($tok.Trim())"
+        }}
+    }}
+
+    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo/releases/latest" -Headers $headers -TimeoutSec 10 -ErrorAction Stop
+    if (-not $rel -or -not $rel.tag_name) {{
+        Write-Output "null"
+        exit 0
+    }}
+
+    $remoteTag = $rel.tag_name.Trim().TrimStart('v')
+
+    $isNewer = $false
+    try {{
+        $vRemote = [version]$remoteTag
+        $vLocal = [version]$current
+        if ($vRemote -gt $vLocal) {{ $isNewer = $true }}
+    }} catch {{
+        if ($remoteTag -ne $current -and $remoteTag -ne '') {{ $isNewer = $true }}
+    }}
+
+    if ($isNewer) {{
+        $exeAsset = $rel.assets | Where-Object {{ $_.name -like "*.exe" }} | Select-Object -First 1
+        $dlUrl = if ($exeAsset) {{ $exeAsset.browser_download_url }} else {{ "" }}
+        $assetName = if ($exeAsset) {{ $exeAsset.name }} else {{ "lantern_scan.exe" }}
+
+        [PSCustomObject]@{{
+            tag_name = $rel.tag_name
+            name = if ($rel.name) {{ $rel.name }} else {{ $rel.tag_name }}
+            body = if ($rel.body) {{ $rel.body }} else {{ "" }}
+            published_at = if ($rel.published_at) {{ $rel.published_at }} else {{ "" }}
+            download_url = $dlUrl
+            asset_name = $assetName
+        }} | ConvertTo-Json -Depth 2 -Compress
+    }} else {{
+        Write-Output "null"
+    }}
+}} catch {{
+    Write-Output "null"
+}}
+"#,
+        ps_escape(owner),
+        ps_escape(repo),
+        ps_escape(current_ver)
+    );
+
+    let output = run_powershell_script(&script)?;
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        Ok(None)
+    } else {
+        match serde_json::from_str::<GitHubReleaseInfo>(trimmed) {
+            Ok(info) => Ok(Some(info)),
+            Err(e) => Err(format!("Error al parsear actualización: {}", e)),
+        }
+    }
+}
+
+fn apply_github_update_sync(download_url: &str) -> Result<(), String> {
+    if download_url.trim().is_empty() {
+        return Err("No se encontró el archivo ejecutable en la versión de GitHub.".to_string());
+    }
+
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$url = '{}'
+$tempExe = "$env:TEMP\lantern_scan_update.exe"
+$updaterBat = "$env:TEMP\lantern_updater.bat"
+$currentExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$wc = New-Object System.Net.WebClient
+
+$ghPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe"
+if (Test-Path $ghPath) {{
+    $tok = (& $ghPath auth token 2>$null)
+    if ($tok -and $tok.Trim() -ne '') {{
+        $wc.Headers.Add("Authorization", "Bearer $($tok.Trim())")
+        $wc.Headers.Add("User-Agent", "lantern-updater")
+    }}
+}}
+
+$wc.DownloadFile($url, $tempExe)
+
+if (-not (Test-Path -LiteralPath $tempExe)) {{
+    throw "No se pudo descargar el archivo de actualización"
+}}
+
+$batContent = @"
+@echo off
+timeout /t 1 /nobreak > nul
+:retry
+copy /y "$tempExe" "$currentExe" > nul
+if errorlevel 1 (
+    timeout /t 1 /nobreak > nul
+    goto retry
+)
+start "" "$currentExe"
+del "$tempExe" > nul 2>&1
+del "%~f0" > nul 2>&1
+"@
+
+[System.IO.File]::WriteAllText($updaterBat, $batContent)
+Start-Process -FilePath $updaterBat -WindowStyle Hidden
+"#,
+        ps_escape(download_url)
+    );
+
+    run_powershell_script(&script)?;
+    Ok(())
+}
+
 // ── Punto de Entrada de la Aplicación ─────────────────────────────────────────
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -12010,6 +12413,8 @@ fn main() -> eframe::Result<()> {
             s.spacing.menu_margin     = Margin::same(6.0);
         });
 
-        Ok(Box::new(LanternApp::default()))
+        let mut app = LanternApp::default();
+        app.check_for_updates();
+        Ok(Box::new(app))
     }))
 }
