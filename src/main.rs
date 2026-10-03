@@ -3276,7 +3276,7 @@ impl LanternApp {
                                                         Vec2::new(available_w * 0.20, 22.0),
                                                         egui::Layout::left_to_right(egui::Align::Center),
                                                         |ui| {
-                                                            let short_id = if snap.id.len() > 16 { format!("{}…", &snap.id[..14]) } else { snap.id.clone() };
+                                                            let short_id = truncate_str_safe(&snap.id, 14);
                                                             ui.label(RichText::new(&short_id).size(10.5).monospace().color(TEXT_DIM)).on_hover_text(&snap.id);
                                                         },
                                                     );
@@ -3481,19 +3481,13 @@ impl LanternApp {
                                                     // ID Archivo
                                                     ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                                         let short_id = format!("{}", file.file_id);
-                                                        let display_id = if short_id.len() > 10 { format!("{}…", &short_id[..9]) } else { short_id };
+                                                        let display_id = truncate_str_safe(&short_id, 9);
                                                         ui.label(RichText::new(display_id).size(10.5).monospace().color(TEXT_DIM)).on_hover_text(format!("FileId: {}", file.file_id));
                                                     });
 
                                                     // Ruta Archivo
                                                     ui.allocate_ui_with_layout(Vec2::new(available_w * 0.38, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                        let display_path = if file.path.len() > 55 {
-                                                            let start = &file.path[..20];
-                                                            let end = &file.path[file.path.len() - 32..];
-                                                            format!("{}…{}", start, end)
-                                                        } else {
-                                                            file.path.clone()
-                                                        };
+                                                        let display_path = truncate_path_safe(&file.path, 55, 20, 32);
                                                         ui.label(RichText::new(display_path).size(11.5).strong().color(TEXT_PRI)).on_hover_text(&file.path);
                                                     });
 
@@ -5020,13 +5014,7 @@ impl LanternApp {
 
                                                     // Ruta Completa
                                                     ui.allocate_ui_with_layout(Vec2::new(available_w * 0.34, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                        let display_path = if file.path.len() > 50 {
-                                                            let start = &file.path[..18];
-                                                            let end = &file.path[file.path.len() - 28..];
-                                                            format!("{}…{}", start, end)
-                                                        } else {
-                                                            file.path.clone()
-                                                        };
+                                                        let display_path = truncate_path_safe(&file.path, 50, 18, 28);
                                                         ui.label(RichText::new(display_path).size(11.0).monospace().color(TEXT_SEC)).on_hover_text(&file.path);
                                                     });
 
@@ -5101,14 +5089,15 @@ impl LanternApp {
         ui.horizontal(|ui| {
             ui.add_space(pad);
             let gap = 16.0;
-            let card_w = (available_w - gap) / 2.0;
+            let card_w = ((available_w - gap) / 2.0).max(220.0);
+            let inner_w = (card_w - 40.0).max(180.0);
 
             // Tarjeta Disco D: Almacenamiento Principal
-            let d_disk = self.fs_disks.iter().find(|d| d.drive == "D:").cloned();
-            let d_size = d_disk.as_ref().map(|d| d.size).unwrap_or(6_442_450_944_000);
-            let d_free = d_disk.as_ref().map(|d| d.free).unwrap_or(4_686_000_000_000);
-            let d_used = d_size - d_free;
-            let d_pct = (d_used as f64 / d_size as f64).clamp(0.0, 1.0);
+            let d_disk = self.fs_disks.iter().find(|d| d.drive.eq_ignore_ascii_case("D:")).cloned();
+            let d_size = d_disk.as_ref().map(|d| d.size).unwrap_or(6_001_170_313_216).max(1);
+            let d_free = d_disk.as_ref().map(|d| d.free).unwrap_or(4_361_480_683_520).max(0);
+            let d_used = d_size.saturating_sub(d_free);
+            let d_pct = if d_size > 0 { ((d_used as f64) / (d_size as f64)).clamp(0.0, 1.0) } else { 0.0 };
 
             egui::Frame::none()
                 .fill(SURFACE_1)
@@ -5116,7 +5105,7 @@ impl LanternApp {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(Margin::same(20.0))
                 .show(ui, |ui| {
-                    ui.set_width(card_w - 40.0);
+                    ui.set_width(inner_w);
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("💾").size(24.0).color(ACCENT));
@@ -5158,7 +5147,7 @@ impl LanternApp {
                         ui.add_space(14.0);
                         ui.label(RichText::new(format!("Ocupación de Almacenamiento: {:.1}%", d_pct * 100.0)).size(11.0).strong().color(TEXT_SEC));
                         ui.add_space(4.0);
-                        ui.add(egui::ProgressBar::new(d_pct as f32).fill(ACCENT).desired_width(card_w - 40.0));
+                        ui.add(egui::ProgressBar::new(d_pct as f32).fill(ACCENT).desired_width(inner_w));
 
                         ui.add_space(16.0);
                         ui.horizontal(|ui| {
@@ -5172,11 +5161,11 @@ impl LanternApp {
             ui.add_space(gap);
 
             // Tarjeta Disco C: Sistema Operativo
-            let c_disk = self.fs_disks.iter().find(|d| d.drive == "C:").cloned();
-            let c_size = c_disk.as_ref().map(|d| d.size).unwrap_or(273_804_161_024);
-            let c_free = c_disk.as_ref().map(|d| d.free).unwrap_or(180_000_000_000);
-            let c_used = c_size - c_free;
-            let c_pct = (c_used as f64 / c_size as f64).clamp(0.0, 1.0);
+            let c_disk = self.fs_disks.iter().find(|d| d.drive.eq_ignore_ascii_case("C:")).cloned();
+            let c_size = c_disk.as_ref().map(|d| d.size).unwrap_or(255_058_767_872).max(1);
+            let c_free = c_disk.as_ref().map(|d| d.free).unwrap_or(163_792_150_528).max(0);
+            let c_used = c_size.saturating_sub(c_free);
+            let c_pct = if c_size > 0 { ((c_used as f64) / (c_size as f64)).clamp(0.0, 1.0) } else { 0.0 };
 
             egui::Frame::none()
                 .fill(SURFACE_1)
@@ -5184,7 +5173,7 @@ impl LanternApp {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(Margin::same(20.0))
                 .show(ui, |ui| {
-                    ui.set_width(card_w - 40.0);
+                    ui.set_width(inner_w);
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("🖥").size(24.0).color(PURPLE));
@@ -5226,7 +5215,7 @@ impl LanternApp {
                         ui.add_space(14.0);
                         ui.label(RichText::new(format!("Ocupación de Sistema: {:.1}%", c_pct * 100.0)).size(11.0).strong().color(TEXT_SEC));
                         ui.add_space(4.0);
-                        ui.add(egui::ProgressBar::new(c_pct as f32).fill(PURPLE).desired_width(card_w - 40.0));
+                        ui.add(egui::ProgressBar::new(c_pct as f32).fill(PURPLE).desired_width(inner_w));
 
                         ui.add_space(16.0);
                         ui.horizontal(|ui| {
@@ -12250,6 +12239,27 @@ fn chrono_now_string() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, s)
 }
 
+fn truncate_path_safe(path: &str, max_chars: usize, head: usize, tail: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() > max_chars {
+        let head_part: String = chars.iter().take(head).collect();
+        let tail_part: String = chars.iter().skip(chars.len().saturating_sub(tail)).collect();
+        format!("{}…{}", head_part, tail_part)
+    } else {
+        path.to_string()
+    }
+}
+
+fn truncate_str_safe(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() > max_chars {
+        let part: String = chars.iter().take(max_chars).collect();
+        format!("{}…", part)
+    } else {
+        s.to_string()
+    }
+}
+
 fn check_github_release_sync(owner: &str, repo: &str, current_ver: &str) -> Result<Option<GitHubReleaseInfo>, String> {
     let script = format!(
         r#"
@@ -12381,6 +12391,15 @@ Start-Process -FilePath $updaterBat -WindowStyle Hidden
 
 // ── Punto de Entrada de la Aplicación ─────────────────────────────────────────
 fn main() -> eframe::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC IN LILI ENTERPRISE NET:\n{}\n", info);
+        if let Ok(temp) = std::env::var("TEMP") {
+            let _ = std::fs::write(format!("{}\\lantern_crash.txt", temp), &msg);
+        }
+        let _ = std::fs::write("lantern_crash.txt", &msg);
+        eprintln!("{}", msg);
+    }));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 840.0])
