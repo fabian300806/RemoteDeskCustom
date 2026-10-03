@@ -742,7 +742,7 @@ impl Default for LanternApp {
             fs_search_open_files: String::new(),
             fs_search_sessions: String::new(),
             fs_search_heavy_files: String::new(),
-            fs_heavy_filter_ext: "Todos".to_string(),
+            fs_heavy_filter_ext: String::new(),
             fs_heavy_loading: false,
             fs_receiver: None,
             fs_acl_receiver: None,
@@ -4885,6 +4885,7 @@ impl LanternApp {
         ui.add_space(10.0);
 
         // Tabla de Archivos Pesados
+        let mut trigger_scan = false;
         let search = self.fs_search_heavy_files.trim().to_lowercase();
         let ext_f = self.fs_heavy_filter_ext.trim().to_lowercase();
 
@@ -4898,7 +4899,7 @@ impl LanternApp {
                 } else {
                     f.name.to_lowercase().contains(&search) || f.path.to_lowercase().contains(&search)
                 };
-                let matches_ext = if ext_f.is_empty() {
+                let matches_ext = if ext_f.is_empty() || ext_f == "todos" {
                     true
                 } else {
                     let ext = f.extension.to_lowercase();
@@ -4925,144 +4926,172 @@ impl LanternApp {
                 .inner_margin(Margin::same(14.0))
                 .show(ui, |ui| {
                     ui.set_width(available_w);
-
-                    // Cabecera de columnas
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(Vec2::new(available_w * 0.28, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("NOMBRE DEL ARCHIVO").size(10.0).strong().color(TEXT_DIM));
+                    ui.vertical(|ui| {
+                        // Cabecera de columnas
+                        ui.horizontal(|ui| {
+                            ui.allocate_ui_with_layout(Vec2::new(available_w * 0.28, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("NOMBRE DEL ARCHIVO").size(10.0).strong().color(TEXT_DIM));
+                            });
+                            ui.allocate_ui_with_layout(Vec2::new(available_w * 0.34, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("RUTA COMPLETA EN VOLUMEN D:").size(10.0).strong().color(TEXT_DIM));
+                            });
+                            ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("TAMAÑO").size(10.0).strong().color(TEXT_DIM));
+                            });
+                            ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("MODIFICADO").size(10.0).strong().color(TEXT_DIM));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("ACCIONES").size(10.0).strong().color(TEXT_DIM));
+                            });
                         });
-                        ui.allocate_ui_with_layout(Vec2::new(available_w * 0.34, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("RUTA COMPLETA EN VOLUMEN D:").size(10.0).strong().color(TEXT_DIM));
-                        });
-                        ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("TAMAÑO").size(10.0).strong().color(TEXT_DIM));
-                        });
-                        ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("MODIFICADO").size(10.0).strong().color(TEXT_DIM));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("ACCIONES").size(10.0).strong().color(TEXT_DIM));
-                        });
-                    });
-                    ui.add_space(6.0);
-                    divider(ui);
-                    ui.add_space(8.0);
+                        ui.add_space(6.0);
+                        divider(ui);
+                        ui.add_space(8.0);
 
-                    if self.fs_heavy_loading && self.fs_heavy_files.is_empty() {
-                        empty_state(ui, available_w, "Escaneando archivos voluminosos en el Servidor de Archivos...");
-                    } else if self.fs_heavy_files.is_empty() {
-                        empty_state(ui, available_w, "Presiona 'Escanear Archivos (> 50 MB)' para analizar el almacenamiento de D:\\SslStorageFile.");
-                    } else if filtered_files.is_empty() {
-                        empty_state(ui, available_w, "No hay archivos que coincidan con la búsqueda o filtro seleccionado.");
-                    } else {
-                        let rows_h = (ui.available_height() - 20.0).max(440.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("heavy_files_table_scroll")
-                            .min_scrolled_height(rows_h)
-                            .max_height(rows_h)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                for (orig_idx, file) in filtered_files {
-                                    let row_bg = if orig_idx % 2 == 0 { SURFACE_1 } else { SURFACE_2 };
-                                    egui::Frame::none()
-                                        .fill(row_bg)
-                                        .stroke(Stroke::new(1.0_f32, BORDER))
-                                        .rounding(Rounding::same(7.0))
-                                        .inner_margin(Margin::symmetric(12.0, 8.0))
-                                        .show(ui, |ui| {
-                                            ui.set_width(available_w - 28.0);
-                                            ui.horizontal(|ui| {
-                                                // Nombre y Badge de Extensión
-                                                ui.allocate_ui_with_layout(Vec2::new(available_w * 0.28, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                    let ext_lower = file.extension.to_lowercase();
-                                                    let (ext_col, icon) = if ext_lower.contains("iso") || ext_lower.contains("vmdk") {
-                                                        (PURPLE, "💾")
-                                                    } else if ext_lower.contains("zip") || ext_lower.contains("rar") || ext_lower.contains("7z") {
-                                                        (WARNING, "📦")
-                                                    } else if ext_lower.contains("mp4") || ext_lower.contains("mkv") || ext_lower.contains("avi") {
-                                                        (TEAL, "🎬")
-                                                    } else if ext_lower.contains("exe") || ext_lower.contains("msi") {
-                                                        (DANGER, "⚙️")
-                                                    } else if ext_lower.contains("bak") || ext_lower.contains("sql") {
-                                                        (ACCENT, "🗄️")
-                                                    } else {
-                                                        (TEXT_SEC, "📄")
-                                                    };
-
-                                                    badge(ui, &format!("{} {}", icon, file.extension.trim_start_matches('.').to_uppercase()), SURFACE_3, ext_col);
-                                                    ui.add_space(6.0);
-                                                    ui.label(RichText::new(&file.name).size(12.0).strong().color(TEXT_PRI)).on_hover_text(&file.name);
-                                                });
-
-                                                // Ruta Completa
-                                                ui.allocate_ui_with_layout(Vec2::new(available_w * 0.34, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                    let display_path = if file.path.len() > 50 {
-                                                        let start = &file.path[..18];
-                                                        let end = &file.path[file.path.len() - 28..];
-                                                        format!("{}…{}", start, end)
-                                                    } else {
-                                                        file.path.clone()
-                                                    };
-                                                    ui.label(RichText::new(display_path).size(11.0).monospace().color(TEXT_SEC)).on_hover_text(&file.path);
-                                                });
-
-                                                // Tamaño
-                                                ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                    let sz_col = if file.size > 1_073_741_824 {
-                                                        DANGER // > 1 GB
-                                                    } else if file.size > 209_715_200 {
-                                                        WARNING // > 200 MB
-                                                    } else {
-                                                        ORANGE
-                                                    };
-                                                    ui.label(RichText::new(format_bytes(file.size)).size(11.5).strong().color(sz_col));
-                                                });
-
-                                                // Fecha Modificación
-                                                ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                                    ui.label(RichText::new(&file.modified).size(11.0).color(TEXT_DIM));
-                                                });
-
-                                                // Acciones
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    // Copiar ruta completa
-                                                    if ui.add(
-                                                        egui::Button::new(RichText::new("📋 Copiar").size(10.5).color(TEXT_SEC))
-                                                            .fill(SURFACE_2)
-                                                            .stroke(Stroke::new(1.0_f32, BORDER))
-                                                            .rounding(Rounding::same(5.0)),
-                                                    ).on_hover_text(&format!("Copiar {}", file.path)).clicked() {
-                                                        ui.ctx().output_mut(|o| o.copied_text = file.path.clone());
-                                                        self.notify("Ruta copiada al portapapeles", ACCENT);
-                                                    }
-
-                                                    ui.add_space(6.0);
-
-                                                    // Abrir carpeta contenedora en Explorer
-                                                    if ui.add(
-                                                        egui::Button::new(RichText::new("📁 Carpeta").size(10.5).color(ORANGE))
-                                                            .fill(Color32::from_rgba_unmultiplied(251, 146, 60, 18))
-                                                            .stroke(Stroke::new(1.0_f32, ORANGE))
-                                                            .rounding(Rounding::same(5.0)),
-                                                    ).on_hover_text("Abrir carpeta contenedora en Explorer").clicked() {
-                                                        let unc_dir = if let Some(parent) = std::path::Path::new(&file.path).parent() {
-                                                            let p_str = parent.to_string_lossy().to_string();
-                                                            let clean = p_str.trim_start_matches("D:").trim_start_matches("d:").trim_start_matches('\\');
-                                                            format!("\\\\{}\\\\D$\\\\{}", self.fs_server, clean)
+                        if self.fs_heavy_loading && self.fs_heavy_files.is_empty() {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(36.0);
+                                ui.spinner();
+                                ui.add_space(12.0);
+                                ui.label(RichText::new("Escaneando archivos voluminosos en D:\\SslStorageFile...").size(13.5).strong().color(TEXT_PRI));
+                                ui.label(RichText::new("Analizando recursivamente todas las carpetas del servidor de archivos").size(11.0).color(TEXT_DIM));
+                                ui.add_space(36.0);
+                            });
+                        } else if self.fs_heavy_files.is_empty() {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(32.0);
+                                ui.label(RichText::new("📈").size(36.0));
+                                ui.add_space(10.0);
+                                ui.label(RichText::new("Analizador de Archivos Pesados y Espacio en Disco").size(14.0).strong().color(TEXT_PRI));
+                                ui.label(RichText::new("Escanea recursivamente D:\\SslStorageFile en el servidor para detectar archivos grandes (> 25 MB).").size(11.0).color(TEXT_DIM));
+                                ui.add_space(16.0);
+                                if ui.add(
+                                    egui::Button::new(RichText::new("⚡ Iniciar Análisis Ahora (> 25 MB)").size(12.0).strong().color(BASE))
+                                        .fill(ORANGE)
+                                        .rounding(Rounding::same(8.0))
+                                        .min_size(Vec2::new(220.0, 34.0)),
+                                ).clicked() {
+                                    trigger_scan = true;
+                                }
+                                ui.add_space(32.0);
+                            });
+                        } else if filtered_files.is_empty() {
+                            empty_state(ui, available_w, "No hay archivos que coincidan con la búsqueda o filtro seleccionado.");
+                        } else {
+                            let rows_h = (ui.available_height() - 20.0).max(440.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("heavy_files_table_scroll")
+                                .min_scrolled_height(rows_h)
+                                .max_height(rows_h)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    for (orig_idx, file) in filtered_files {
+                                        let row_bg = if orig_idx % 2 == 0 { SURFACE_1 } else { SURFACE_2 };
+                                        egui::Frame::none()
+                                            .fill(row_bg)
+                                            .stroke(Stroke::new(1.0_f32, BORDER))
+                                            .rounding(Rounding::same(7.0))
+                                            .inner_margin(Margin::symmetric(12.0, 8.0))
+                                            .show(ui, |ui| {
+                                                ui.set_width(available_w - 28.0);
+                                                ui.horizontal(|ui| {
+                                                    // Nombre y Badge de Extensión
+                                                    ui.allocate_ui_with_layout(Vec2::new(available_w * 0.28, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                        let ext_lower = file.extension.to_lowercase();
+                                                        let (ext_col, icon) = if ext_lower.contains("iso") || ext_lower.contains("vmdk") {
+                                                            (PURPLE, "💾")
+                                                        } else if ext_lower.contains("zip") || ext_lower.contains("rar") || ext_lower.contains("7z") {
+                                                            (WARNING, "📦")
+                                                        } else if ext_lower.contains("mp4") || ext_lower.contains("mkv") || ext_lower.contains("avi") {
+                                                            (TEAL, "🎬")
+                                                        } else if ext_lower.contains("exe") || ext_lower.contains("msi") {
+                                                            (DANGER, "⚙️")
+                                                        } else if ext_lower.contains("bak") || ext_lower.contains("sql") {
+                                                            (ACCENT, "🗄️")
                                                         } else {
-                                                            format!("\\\\{}\\\\D$", self.fs_server)
+                                                            (TEXT_SEC, "📄")
                                                         };
-                                                        let _ = Command::new("explorer.exe").arg(&unc_dir).spawn();
-                                                    }
+
+                                                        badge(ui, &format!("{} {}", icon, file.extension.trim_start_matches('.').to_uppercase()), SURFACE_3, ext_col);
+                                                        ui.add_space(6.0);
+                                                        ui.label(RichText::new(&file.name).size(12.0).strong().color(TEXT_PRI)).on_hover_text(&file.name);
+                                                    });
+
+                                                    // Ruta Completa
+                                                    ui.allocate_ui_with_layout(Vec2::new(available_w * 0.34, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                        let display_path = if file.path.len() > 50 {
+                                                            let start = &file.path[..18];
+                                                            let end = &file.path[file.path.len() - 28..];
+                                                            format!("{}…{}", start, end)
+                                                        } else {
+                                                            file.path.clone()
+                                                        };
+                                                        ui.label(RichText::new(display_path).size(11.0).monospace().color(TEXT_SEC)).on_hover_text(&file.path);
+                                                    });
+
+                                                    // Tamaño
+                                                    ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                        let sz_col = if file.size > 1_073_741_824 {
+                                                            DANGER // > 1 GB
+                                                        } else if file.size > 209_715_200 {
+                                                            WARNING // > 200 MB
+                                                        } else {
+                                                            ORANGE
+                                                        };
+                                                        ui.label(RichText::new(format_bytes(file.size)).size(11.5).strong().color(sz_col));
+                                                    });
+
+                                                    // Fecha Modificación
+                                                    ui.allocate_ui_with_layout(Vec2::new(available_w * 0.12, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                        ui.label(RichText::new(&file.modified).size(11.0).color(TEXT_DIM));
+                                                    });
+
+                                                    // Acciones
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        // Copiar ruta completa
+                                                        if ui.add(
+                                                            egui::Button::new(RichText::new("📋 Copiar").size(10.5).color(TEXT_SEC))
+                                                                .fill(SURFACE_2)
+                                                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                                                .rounding(Rounding::same(5.0)),
+                                                        ).on_hover_text(&format!("Copiar {}", file.path)).clicked() {
+                                                            ui.ctx().output_mut(|o| o.copied_text = file.path.clone());
+                                                            self.notify("Ruta copiada al portapapeles", ACCENT);
+                                                        }
+
+                                                        ui.add_space(6.0);
+
+                                                        // Abrir carpeta contenedora en Explorer
+                                                        if ui.add(
+                                                            egui::Button::new(RichText::new("📁 Carpeta").size(10.5).color(ORANGE))
+                                                                .fill(Color32::from_rgba_unmultiplied(251, 146, 60, 18))
+                                                                .stroke(Stroke::new(1.0_f32, ORANGE))
+                                                                .rounding(Rounding::same(5.0)),
+                                                        ).on_hover_text("Abrir carpeta contenedora en Explorer").clicked() {
+                                                            let unc_dir = if let Some(parent) = std::path::Path::new(&file.path).parent() {
+                                                                let p_str = parent.to_string_lossy().to_string();
+                                                                let clean = p_str.trim_start_matches("D:").trim_start_matches("d:").trim_start_matches('\\');
+                                                                format!("\\\\{}\\\\D$\\\\{}", self.fs_server, clean)
+                                                            } else {
+                                                                format!("\\\\{}\\\\D$", self.fs_server)
+                                                            };
+                                                            let _ = Command::new("explorer.exe").arg(&unc_dir).spawn();
+                                                        }
+                                                    });
                                                 });
                                             });
-                                        });
-                                    ui.add_space(4.0);
-                                }
-                            });
-                    }
+                                        ui.add_space(4.0);
+                                    }
+                                });
+                        }
+                    });
                 });
         });
+
+        if trigger_scan {
+            self.fetch_heavy_files_scan();
+        }
     }
 
     // ── Sub-Pestaña 5: Unidades y Almacenamiento ──────────────────────────────
@@ -9253,7 +9282,7 @@ impl eframe::App for LanternApp {
         self.poll_fs();
         self.poll_updater(ctx);
         // Redibujar frecuentemente al escanear, sincronizar AD / Servidor de Archivos, o cada 2s para la notificación
-        if self.scanning || self.ad_loading || self.fs_loading || self.updater_checking || self.updater_downloading {
+        if self.scanning || self.ad_loading || self.fs_loading || self.fs_heavy_loading || self.updater_checking || self.updater_downloading {
             ctx.request_repaint_after(Duration::from_millis(60));
         } else if self.notification.is_some() {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -11791,46 +11820,54 @@ try {{
 fn fs_scan_heavy_files_sync(server: &str, auth_user: &str, auth_pass: &str) -> Result<Vec<FsHeavyFile>, String> {
     let script = format!(
         r#"
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 $server = '{}'
 $user = '{}'; $pass = '{}';
 
-try {{
-    if ($user -and $user.Trim() -ne '') {{
-        $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-        $cred = New-Object System.Management.Automation.PSCredential($user, $sec)
-        $sess = New-CimSession -ComputerName $server -Credential $cred -ErrorAction Stop
-    }} else {{
-        $sess = New-CimSession -ComputerName $server -ErrorAction Stop
+$cred = if ($user -and $user.Trim() -ne '') {{
+    $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+    New-Object System.Management.Automation.PSCredential($user, $sec)
+}} else {{ $null }}
+
+$sb = {{
+    $root = "D:\SslStorageFile"
+    $minBytes = 26214400 # 25 MB
+    $results = New-Object System.Collections.ArrayList
+    if (Test-Path -LiteralPath $root) {{
+        $dirInfo = New-Object System.IO.DirectoryInfo($root)
+        $files = $dirInfo.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
+        foreach ($f in $files) {{
+            try {{
+                if ($f.Length -ge $minBytes) {{
+                    $ext = if ($f.Extension) {{ $f.Extension.ToLower() }} else {{ "" }}
+                    [void]$results.Add([PSCustomObject]@{{
+                        name = $f.Name
+                        path = $f.FullName
+                        size = [int64]$f.Length
+                        modified = $f.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                        extension = $ext
+                    }})
+                }}
+            }} catch {{}}
+        }}
     }}
-}} catch {{
-    throw "Error al conectar a $server : $($_.Exception.Message)"
+    $sorted = if ($results.Count -gt 0) {{
+        @($results | Sort-Object size -Descending | Select-Object -First 100)
+    }} else {{
+        @()
+    }}
+    ConvertTo-Json -InputObject $sorted -Depth 2 -Compress
 }}
 
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 try {{
-    $dirs = @('app', 'compras', 'oic', 'diarde', 'transparencia', 'uaf', 'inspeccion', 'diar', 'pet')
-    $heavy = @()
-    foreach ($d in $dirs) {{
-        $p = "\\SslStorageFile\\$d\\"
-        $files = Get-CimInstance -CimSession $sess -ClassName CIM_DataFile -Filter "Drive='D:' and Path='$p' and FileSize > 5242880" | ForEach-Object {{
-            $ext = if ($_.Extension) {{ ".$($_.Extension.ToLower())" }} else {{ "" }}
-            [PSCustomObject]@{{
-                path = if ($_.Name) {{ [string]$_.Name }} else {{ "" }}
-                name = "$($_.FileName)$ext"
-                extension = $ext
-                size = [int64]$_.FileSize
-                modified = if ($_.LastModified) {{ $_.LastModified.ToString("yyyy-MM-dd HH:mm") }} else {{ "" }}
-            }}
-        }}
-        if ($files) {{ $heavy += $files }}
+    if ($cred) {{
+        Invoke-Command -ComputerName $server -Credential $cred -ScriptBlock $sb -ErrorAction Stop
+    }} else {{
+        Invoke-Command -ComputerName $server -ScriptBlock $sb -ErrorAction Stop
     }}
-
-    $sorted = if ($heavy) {{ @($heavy) | Sort-Object size -Descending | Select-Object -First 60 }} else {{ @() }}
-    $json = if ($sorted) {{ @($sorted) | ConvertTo-Json -Depth 2 -Compress }} else {{ "[]" }}
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    Write-Output $json
-}} finally {{
-    if ($sess) {{ Remove-CimSession -CimSession $sess -ErrorAction SilentlyContinue }}
+}} catch {{
+    Write-Output "[]"
 }}
 "#,
         ps_escape(server),
