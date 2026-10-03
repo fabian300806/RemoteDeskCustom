@@ -12339,13 +12339,13 @@ $currentExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileN
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $wc = New-Object System.Net.WebClient
+$wc.Headers.Add("User-Agent", "lantern-updater")
 
 $ghPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe"
 if (Test-Path $ghPath) {{
     $tok = (& $ghPath auth token 2>$null)
     if ($tok -and $tok.Trim() -ne '') {{
         $wc.Headers.Add("Authorization", "Bearer $($tok.Trim())")
-        $wc.Headers.Add("User-Agent", "lantern-updater")
     }}
 }}
 
