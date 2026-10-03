@@ -1,0 +1,16 @@
+# Build artifacts
+/target
+Cargo.lock
+
+# Temporary and log files
+*.log
+scratch/
+.system_generated/
+
+# Editor configurations
+.vscode/
+.idea/
+
+# Sensitive or generated license files
+*.lic
+*.key
