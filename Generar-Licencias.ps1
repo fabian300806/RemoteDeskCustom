@@ -44,7 +44,7 @@ public class ILIKeygen {
 
     public static string GenerateKey(string prefix, string p1, string p2) {
         string chk = ComputeChecksum(prefix + p1 + p2);
-        return string.Format("ILI-{0}-{1}-{2}-{3}", prefix, p1, p2, chk);
+        return string.Format("LILI-{0}-{1}-{2}-{3}", prefix, p1, p2, chk);
     }
 }
 '@

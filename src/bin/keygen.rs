@@ -1,5 +1,5 @@
 // ============================================================================
-// ili enterprise NET — Generador de Claves Seriales Corporativas
+// Lili enterprise NET — Generador de Claves Seriales Corporativas
 // ============================================================================
 
 use std::env;
@@ -71,12 +71,12 @@ pub fn generate_key(rng: &mut Rng, prefix: &str) -> String {
     let p2 = rng.next_block();
     let payload = format!("{}{}{}", prefix, p1, p2);
     let chk = compute_checksum(&payload);
-    format!("ILI-{}-{}-{}-{}", prefix, p1, p2, chk)
+    format!("LILI-{}-{}-{}-{}", prefix, p1, p2, chk)
 }
 
 fn print_header() {
     println!("============================================================");
-    println!("     GENERADOR DE CLAVES SERIALES — ili enterprise NET      ");
+    println!("     GENERADOR DE CLAVES SERIALES — Lili enterprise NET      ");
     println!("============================================================");
 }
 
@@ -139,18 +139,18 @@ fn main() {
     };
 
     let edicion_nombre = match prefix.as_str() {
-        "ENT1" => "ili enterprise NET — Suite Completa Enterprise",
-        "NET1" => "ili enterprise NET — Modulo Control de Red",
-        "DIR1" => "ili enterprise NET — Modulo Active Directory",
-        "SRV1" => "ili enterprise NET — Modulo Servidor de Archivos",
-        "CORP" => "ili enterprise NET — Licencia Corporativa Ilimitada",
-        "PRO1" => "ili enterprise NET — Edicion Profesional (Red + Archivos)",
-        "DEMO" => "ili enterprise NET — Licencia de Demostracion / Evaluacion",
-        _ => "ili enterprise NET — Licencia Comercial Especial",
+        "ENT1" => "Lili enterprise NET — Suite Completa Enterprise",
+        "NET1" => "Lili enterprise NET — Modulo Control de Red",
+        "DIR1" => "Lili enterprise NET — Modulo Active Directory",
+        "SRV1" => "Lili enterprise NET — Modulo Servidor de Archivos",
+        "CORP" => "Lili enterprise NET — Licencia Corporativa Ilimitada",
+        "PRO1" => "Lili enterprise NET — Edicion Profesional (Red + Archivos)",
+        "DEMO" => "Lili enterprise NET — Licencia de Demostracion / Evaluacion",
+        _ => "Lili enterprise NET — Licencia Comercial Especial",
     };
 
     println!("\n============================================================");
-    println!("  GENERANDO CLAVES DE ACTIVACION — ili enterprise NET       ");
+    println!("  GENERANDO CLAVES DE ACTIVACION — Lili enterprise NET       ");
     println!("============================================================");
     println!("Edicion seleccionada : {} ({})", prefix, edicion_nombre);
     println!("Cantidad a generar   : {} licencias", count);
@@ -169,7 +169,7 @@ fn main() {
     if let Some(path) = output_file {
         if let Ok(mut f) = File::create(&path) {
             let _ = writeln!(f, "============================================================");
-            let _ = writeln!(f, " CLAVES DE ACTIVACION — ili enterprise NET");
+            let _ = writeln!(f, " CLAVES DE ACTIVACION — Lili enterprise NET");
             let _ = writeln!(f, "============================================================");
             let _ = writeln!(f, "Edicion : {} ({})", prefix, edicion_nombre);
             let _ = writeln!(f, "Total   : {} licencias", count);
@@ -179,7 +179,7 @@ fn main() {
             }
             let _ = writeln!(f, "\n------------------------------------------------------------");
             let _ = writeln!(f, "Instrucciones:");
-            let _ = writeln!(f, "1. Inicie 'ili enterprise NET'");
+            let _ = writeln!(f, "1. Inicie 'Lili enterprise NET'");
             let _ = writeln!(f, "2. Pegue cualquiera de estas claves en la pantalla de activacion.");
             println!("\n[GUARDADO] Claves guardadas en: {}", path);
         }

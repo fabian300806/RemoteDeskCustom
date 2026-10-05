@@ -81,14 +81,17 @@ mod license {
             .map(|c| c.to_ascii_uppercase())
             .collect();
 
-        if !clean.starts_with("ILI") {
-            return Err("El serial debe comenzar con el prefijo 'ILI-' (ej. ILI-ENT1-XXXX-XXXX-XXXX)".into());
-        }
+        let (body, prefix_code) = if clean.starts_with("LILI") {
+            (&clean[4..], "LILI")
+        } else if clean.starts_with("ILI") {
+            (&clean[3..], "ILI")
+        } else {
+            return Err("El serial debe comenzar con el prefijo 'LILI-' o 'ILI-' (ej. LILI-ENT1-XXXX-XXXX-XXXX)".into());
+        };
 
-        let body = &clean[3..];
         if body.len() != 16 {
             return Err(format!(
-                "Longitud de clave incorrecta: se esperan 16 caracteres alfanuméricos después de ILI- (recibidos {})",
+                "Longitud de clave incorrecta: se esperan 16 caracteres alfanuméricos después del prefijo (recibidos {})",
                 body.len()
             ));
         }
@@ -102,23 +105,24 @@ mod license {
         }
 
         let (edition, has_network, has_activedirectory, has_fileserver) = if payload.starts_with("ENT") || payload.starts_with("CORP") || payload.starts_with("SUIT") {
-            ("ili enterprise NET — Suite Completa Enterprise (Todos los módulos)".to_string(), true, true, true)
+            ("Lili enterprise NET — Suite Completa Enterprise (Todos los módulos)".to_string(), true, true, true)
         } else if payload.starts_with("NET") {
-            ("ili enterprise NET — Módulo Control de Red".to_string(), true, false, false)
+            ("Lili enterprise NET — Módulo Control de Red".to_string(), true, false, false)
         } else if payload.starts_with("DIR") {
-            ("ili enterprise NET — Módulo Active Directory".to_string(), false, true, false)
+            ("Lili enterprise NET — Módulo Active Directory".to_string(), false, true, false)
         } else if payload.starts_with("SRV") {
-            ("ili enterprise NET — Módulo Servidor de Archivos".to_string(), false, false, true)
+            ("Lili enterprise NET — Módulo Servidor de Archivos".to_string(), false, false, true)
         } else if payload.starts_with("PRO") {
-            ("ili enterprise NET — Edición Profesional (Red + Archivos)".to_string(), true, false, true)
+            ("Lili enterprise NET — Edición Profesional (Red + Archivos)".to_string(), true, false, true)
         } else if payload.starts_with("DEMO") {
-            ("ili enterprise NET — Licencia de Demostración Completa".to_string(), true, true, true)
+            ("Lili enterprise NET — Licencia de Demostración Completa".to_string(), true, true, true)
         } else {
-            ("ili enterprise NET — Licencia Comercial Validada".to_string(), true, true, true)
+            ("Lili enterprise NET — Licencia Comercial Validada".to_string(), true, true, true)
         };
 
         let formatted = format!(
-            "ILI-{}-{}-{}-{}",
+            "{}-{}-{}-{}-{}",
+            prefix_code,
             &body[0..4],
             &body[4..8],
             &body[8..12],
@@ -9425,7 +9429,7 @@ impl LanternApp {
                                         BASE,
                                     );
                                     ui.add_space(10.0);
-                                    ui.label(RichText::new("ili enterprise NET").size(22.0).strong().color(TEXT_PRI));
+                                    ui.label(RichText::new("Lili enterprise NET").size(22.0).strong().color(TEXT_PRI));
                                     ui.add_space(2.0);
                                     ui.label(RichText::new("Control de Acceso y Gestión de Red Segura").size(11.5).color(TEXT_SEC));
                                     ui.add_space(10.0);
@@ -10124,7 +10128,7 @@ impl LanternApp {
         let current_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
         let rel_opt = self.updater_available_release.clone();
 
-        egui::Window::new("🚀 Actualización de Sistema — ili Enterprise NET")
+        egui::Window::new("🚀 Actualización de Sistema — Lili Enterprise NET")
             .collapsible(false)
             .resizable(false)
             .order(egui::Order::Foreground)
@@ -13966,7 +13970,7 @@ if (Get-Command curl.exe -ErrorAction SilentlyContinue) {{
 if (-not $downloadOk) {{
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "ili-updater")
+    $wc.Headers.Add("User-Agent", "Lili-updater")
 
     $ghPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe"
     if (Test-Path $ghPath) {{

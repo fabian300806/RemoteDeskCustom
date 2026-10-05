@@ -1,5 +1,5 @@
 // ============================================================================
-// ili enterprise NET — Módulo de Autenticación, Roles y Base de Datos Local
+// Lili enterprise NET — Módulo de Autenticación, Roles y Base de Datos Local
 // ============================================================================
 
 use std::path::PathBuf;
