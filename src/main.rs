@@ -37,6 +37,10 @@ const TEAL:        Color32 = Color32::from_rgb(45, 212, 191);  // Turquesa WMI
 const SIDEBAR_W:   f32     = 230.0;
 const DETAIL_W:    f32     = 370.0;
 
+// ── Módulo de Autenticación Local SQLite y Roles (RBAC) ───────────────────────
+mod auth;
+use auth::{AuthDb, UserAccount, UserRole};
+
 // ── Sistema de Licenciamiento y Activación por Código Serial ──────────────────
 mod license {
     use std::fs;
@@ -51,6 +55,9 @@ mod license {
         pub licensee: String,
         pub is_trial: bool,
         pub days_left: i64,
+        pub has_network: bool,
+        pub has_activedirectory: bool,
+        pub has_fileserver: bool,
     }
 
     pub fn compute_checksum(payload: &str) -> String {
@@ -94,16 +101,20 @@ mod license {
             return Err("Código de verificación o suma de comprobación del serial no válida.".into());
         }
 
-        let edition = if payload.starts_with("ENT") {
-            "Lili enterprise NET — Edición Corporativa Enterprise".to_string()
-        } else if payload.starts_with("CORP") {
-            "Lili enterprise NET — Licencia Corporativa Ilimitada".to_string()
+        let (edition, has_network, has_activedirectory, has_fileserver) = if payload.starts_with("ENT") || payload.starts_with("CORP") || payload.starts_with("SUIT") {
+            ("ili enterprise NET — Suite Completa Enterprise (Todos los módulos)".to_string(), true, true, true)
+        } else if payload.starts_with("NET") {
+            ("ili enterprise NET — Módulo Control de Red".to_string(), true, false, false)
+        } else if payload.starts_with("DIR") {
+            ("ili enterprise NET — Módulo Active Directory".to_string(), false, true, false)
+        } else if payload.starts_with("SRV") {
+            ("ili enterprise NET — Módulo Servidor de Archivos".to_string(), false, false, true)
         } else if payload.starts_with("PRO") {
-            "Lili enterprise NET — Edición Profesional Avanzada".to_string()
+            ("ili enterprise NET — Edición Profesional (Red + Archivos)".to_string(), true, false, true)
         } else if payload.starts_with("DEMO") {
-            "Lili enterprise NET — Licencia de Evaluación y Demostración".to_string()
+            ("ili enterprise NET — Licencia de Demostración Completa".to_string(), true, true, true)
         } else {
-            "Lili enterprise NET — Licencia Comercial Validada".to_string()
+            ("ili enterprise NET — Licencia Comercial Validada".to_string(), true, true, true)
         };
 
         let formatted = format!(
@@ -120,6 +131,9 @@ mod license {
             licensee: "Empresa / Administrador de Red".into(),
             is_trial: false,
             days_left: 99999,
+            has_network,
+            has_activedirectory,
+            has_fileserver,
         })
     }
 
@@ -182,10 +196,13 @@ mod license {
         if days_left > 0 {
             Some(Ok(LicenseInfo {
                 key: "EVALUACIÓN TEMPORAL (10 DÍAS)".to_string(),
-                edition: format!("Prueba Gratuita (Quedan {} días)", days_left),
+                edition: format!("Prueba Gratuita Completa (Quedan {} días)", days_left),
                 licensee: "Evaluación Corporativa".to_string(),
                 is_trial: true,
                 days_left,
+                has_network: true,
+                has_activedirectory: true,
+                has_fileserver: true,
             }))
         } else {
             Some(Err(()))
@@ -217,19 +234,53 @@ mod license {
 
         LicenseInfo {
             key: "EVALUACIÓN TEMPORAL (10 DÍAS)".to_string(),
-            edition: format!("Prueba Gratuita (Quedan {} días)", TRIAL_TOTAL_DAYS),
+            edition: format!("Prueba Gratuita Completa (Quedan {} días)", TRIAL_TOTAL_DAYS),
             licensee: "Evaluación Corporativa".to_string(),
             is_trial: true,
             days_left: TRIAL_TOTAL_DAYS,
+            has_network: true,
+            has_activedirectory: true,
+            has_fileserver: true,
         }
     }
 
     pub fn load_saved_license() -> Option<LicenseInfo> {
         if let Some(path) = license_file_path() {
             if let Ok(content) = fs::read_to_string(path) {
-                let key = content.trim();
-                if let Ok(info) = validate_key(key) {
-                    return Some(info);
+                let lines: Vec<&str> = content.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                let mut valid_keys = Vec::new();
+                for l in lines {
+                    if let Ok(info) = validate_key(l) {
+                        valid_keys.push(info);
+                    }
+                }
+                if !valid_keys.is_empty() {
+                    let has_network = valid_keys.iter().any(|k| k.has_network);
+                    let has_ad = valid_keys.iter().any(|k| k.has_activedirectory);
+                    let has_fs = valid_keys.iter().any(|k| k.has_fileserver);
+
+                    let edition = if has_network && has_ad && has_fs {
+                        "Suite Completa Enterprise (Todos los módulos activos)".to_string()
+                    } else {
+                        let mut mods = Vec::new();
+                        if has_network { mods.push("Red"); }
+                        if has_ad { mods.push("Active Directory"); }
+                        if has_fs { mods.push("Servidor de Archivos"); }
+                        format!("Módulos Activos: {}", mods.join(" + "))
+                    };
+
+                    let key_summary = valid_keys.iter().map(|k| k.key.clone()).collect::<Vec<_>>().join(" | ");
+
+                    return Some(LicenseInfo {
+                        key: key_summary,
+                        edition,
+                        licensee: "Empresa / Administrador de Red".into(),
+                        is_trial: false,
+                        days_left: 99999,
+                        has_network,
+                        has_activedirectory: has_ad,
+                        has_fileserver: has_fs,
+                    });
                 }
             }
         }
@@ -241,7 +292,18 @@ mod license {
 
     pub fn save_license(key: &str) -> Result<(), String> {
         let path = license_file_path().ok_or_else(|| "No se pudo resolver la ruta de APPDATA".to_string())?;
-        fs::write(path, key.trim()).map_err(|e| format!("Error al guardar licencia en disco: {}", e))?;
+        let clean_key = key.trim();
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = existing.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if !lines.iter().any(|&l| l.eq_ignore_ascii_case(clean_key)) {
+            let mut new_content = existing;
+            if !new_content.is_empty() && !new_content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            new_content.push_str(clean_key);
+            new_content.push('\n');
+            fs::write(path, new_content).map_err(|e| format!("Error al guardar licencia en disco: {}", e))?;
+        }
         Ok(())
     }
 
@@ -721,6 +783,30 @@ struct LanternApp {
     fs_browser_show_new_folder_modal: bool,
     fs_browser_new_folder_name: String,
 
+    // Autenticación Local SQLite y Roles (RBAC)
+    auth_db: Option<AuthDb>,
+    current_user: Option<UserAccount>,
+    auth_mode_register: bool,
+    auth_login_username: String,
+    auth_login_password: String,
+    auth_login_show_pwd: bool,
+    auth_reg_username: String,
+    auth_reg_fullname: String,
+    auth_reg_password: String,
+    auth_reg_confirm_pwd: String,
+    auth_reg_role: UserRole,
+    auth_error_msg: Option<String>,
+    auth_user_count: usize,
+
+    // Gestión de Usuarios (Panel de Administrador)
+    admin_user_list: Vec<UserAccount>,
+    admin_show_create_modal: bool,
+    admin_new_username: String,
+    admin_new_fullname: String,
+    admin_new_password: String,
+    admin_new_role: UserRole,
+    admin_user_msg: Option<(String, Color32)>,
+
     // Sistema de Licencia y Activación Serial
     license: Option<license::LicenseInfo>,
     activation_key_input: String,
@@ -755,7 +841,43 @@ impl Default for LanternApp {
         let target_subnet = "10.35.10.0/24".to_string();
         let saved_license = license::load_saved_license();
 
+        let auth_db = match auth::AuthDb::open() {
+            Ok(db) => Some(db),
+            Err(e) => {
+                eprintln!("Error abriendo base de datos SQLite auth.db: {}", e);
+                None
+            }
+        };
+        let user_count = auth_db.as_ref().and_then(|db| db.count_users().ok()).unwrap_or(0);
+        let mut admin_user_list = Vec::new();
+        if let Some(db) = &auth_db {
+            if let Ok(list) = db.list_users() {
+                admin_user_list = list;
+            }
+        }
+
         let mut app = Self {
+            auth_db,
+            current_user: None,
+            auth_mode_register: user_count == 0,
+            auth_login_username: String::new(),
+            auth_login_password: String::new(),
+            auth_login_show_pwd: false,
+            auth_reg_username: String::new(),
+            auth_reg_fullname: String::new(),
+            auth_reg_password: String::new(),
+            auth_reg_confirm_pwd: String::new(),
+            auth_reg_role: if user_count == 0 { auth::UserRole::Admin } else { auth::UserRole::NetworkTech },
+            auth_error_msg: None,
+            auth_user_count: user_count,
+            admin_user_list,
+            admin_show_create_modal: false,
+            admin_new_username: String::new(),
+            admin_new_fullname: String::new(),
+            admin_new_password: String::new(),
+            admin_new_role: auth::UserRole::NetworkTech,
+            admin_user_msg: None,
+
             cidr: target_subnet.clone(),
             selected_range_preset: 0,
             active_tab: 0,
@@ -1602,6 +1724,41 @@ impl LanternApp {
                 // Indicadores y controles en el lado derecho
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(20.0);
+
+                    // Botón Cerrar Sesión y Badge de Usuario
+                    if let Some(user) = &self.current_user.clone() {
+                        if ui.add(
+                            egui::Button::new(RichText::new("🚪 Salir").size(10.0).color(DANGER))
+                                .fill(SURFACE_2)
+                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(0.0, 24.0))
+                        ).on_hover_text("Cerrar sesión actual de usuario").clicked() {
+                            self.current_user = None;
+                            self.notify("Sesión cerrada correctamente", WARNING);
+                        }
+
+                        let role_color = match user.role {
+                            UserRole::Admin => ACCENT,
+                            UserRole::NetworkTech => TEAL,
+                            UserRole::DomainAdmin => PURPLE,
+                            UserRole::FileOperator => ORANGE,
+                        };
+
+                        egui::Frame::none()
+                            .fill(SURFACE_2)
+                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .rounding(Rounding::same(6.0))
+                            .inner_margin(Margin::symmetric(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("👤").size(11.0));
+                                    ui.label(RichText::new(&user.full_name).size(10.5).strong().color(TEXT_PRI));
+                                    badge(ui, user.role.display_name(), Color32::from_rgba_unmultiplied(role_color.r(), role_color.g(), role_color.b(), 30), role_color);
+                                });
+                            });
+                        ui.add_space(8.0);
+                    }
 
                     // Botón de Actualizaciones GitHub
                     if let Some(rel) = &self.updater_available_release {
@@ -8317,6 +8474,16 @@ impl LanternApp {
                                 detail_kv(ui, "Estado de Licencia", &lic.edition, left_info_w);
                                 detail_kv(ui, "Código Serial", &lic.key, left_info_w);
                                 detail_kv(ui, "Titular de Licencia", &lic.licensee, left_info_w);
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("Módulos Habilitados:").size(10.5).strong().color(TEXT_PRI));
+                                    let net_col = if lic.has_network { SUCCESS } else { TEXT_DIM };
+                                    badge(ui, if lic.has_network { "✓ Red" } else { "✕ Red" }, Color32::from_rgba_unmultiplied(net_col.r(), net_col.g(), net_col.b(), 25), net_col);
+                                    let ad_col = if lic.has_activedirectory { SUCCESS } else { TEXT_DIM };
+                                    badge(ui, if lic.has_activedirectory { "✓ Active Directory" } else { "✕ Active Directory" }, Color32::from_rgba_unmultiplied(ad_col.r(), ad_col.g(), ad_col.b(), 25), ad_col);
+                                    let fs_col = if lic.has_fileserver { SUCCESS } else { TEXT_DIM };
+                                    badge(ui, if lic.has_fileserver { "✓ Servidor Archivos" } else { "✕ Servidor Archivos" }, Color32::from_rgba_unmultiplied(fs_col.r(), fs_col.g(), fs_col.b(), 25), fs_col);
+                                });
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if lic.is_trial {
@@ -8354,6 +8521,9 @@ impl LanternApp {
                     }
                 });
         });
+
+        // Fila 3: Gestión de Usuarios y Roles (SQLite Local)
+        self.ui_user_management(ui, pad);
         ui.add_space(pad);
     }
 
@@ -9115,6 +9285,582 @@ impl LanternApp {
             });
     }
 
+    fn reload_admin_users(&mut self) {
+        if let Some(db) = &self.auth_db {
+            if let Ok(list) = db.list_users() {
+                self.admin_user_list = list;
+            }
+            if let Ok(cnt) = db.count_users() {
+                self.auth_user_count = cnt;
+            }
+        }
+    }
+
+    fn ui_role_forbidden(&self, ui: &mut egui::Ui, req_role: &str) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(80.0);
+            let w = 520.0f32.min(ui.available_width() - 40.0);
+            egui::Frame::none()
+                .fill(SURFACE_1)
+                .stroke(Stroke::new(1.0_f32, DANGER))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(Margin::same(24.0))
+                .show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("🔒").size(42.0));
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Acceso Restringido por Rol de Usuario").size(16.0).strong().color(DANGER));
+                        ui.add_space(8.0);
+                        if let Some(u) = &self.current_user {
+                            ui.label(RichText::new(format!("Usuario actual: {} (Rol: {})", u.username, u.role.display_name())).size(11.5).color(TEXT_SEC));
+                        }
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(format!("Para utilizar este módulo se requieren permisos de rol: {}.", req_role)).size(11.5).color(TEXT_PRI));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Solicite a un Administrador que actualice sus privilegios en la sección de Configuración.").size(10.5).color(TEXT_DIM));
+                    });
+                });
+        });
+    }
+
+    fn ui_license_forbidden(&mut self, ui: &mut egui::Ui, req_module: &str, license_prefix: &str) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(80.0);
+            let w = 560.0f32.min(ui.available_width() - 40.0);
+            egui::Frame::none()
+                .fill(SURFACE_1)
+                .stroke(Stroke::new(1.0_f32, WARNING))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(Margin::same(24.0))
+                .show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("📦").size(42.0));
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(format!("Módulo de {} no incluido en su licencia", req_module)).size(16.0).strong().color(WARNING));
+                        ui.add_space(8.0);
+                        if let Some(lic) = &self.license {
+                            ui.label(RichText::new(format!("Licencia activa actual: {}", lic.edition)).size(11.5).color(TEXT_SEC));
+                        }
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(format!("Para desbloquear este módulo, introduzca una clave serial de tipo {} o la Suite Completa Enterprise (ILI-ENT1-):", license_prefix)).size(11.5).color(TEXT_PRI));
+                        ui.add_space(12.0);
+
+                        let mut key_input = self.activation_key_input.clone();
+                        custom_text_input(ui, &mut key_input, &format!("{}XXXX-XXXX-XXXX", license_prefix), w - 30.0);
+                        self.activation_key_input = key_input;
+
+                        ui.add_space(10.0);
+                        if ui.add(
+                            egui::Button::new(RichText::new("🚀 Activar Módulo Ahora").size(12.0).strong().color(BASE))
+                                .fill(ACCENT)
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(220.0, 34.0))
+                        ).clicked() {
+                            match license::validate_key(&self.activation_key_input) {
+                                Ok(info) => {
+                                    let _ = license::save_license(&info.key);
+                                    let updated = license::load_saved_license().unwrap_or(info);
+                                    self.license = Some(updated.clone());
+                                    self.notify("¡Módulo activado con éxito!", SUCCESS);
+                                    self.add_log("Licencia", &format!("Módulo agregado exitosamente: {}", updated.edition), SUCCESS);
+                                    self.activation_key_input.clear();
+                                    self.activation_error = None;
+                                }
+                                Err(e) => {
+                                    self.activation_error = Some(e);
+                                }
+                            }
+                        }
+
+                        if let Some(err) = &self.activation_error {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(err).size(11.0).color(DANGER));
+                        }
+                    });
+                });
+        });
+    }
+
+    fn ui_auth_view(&mut self, ui: &mut egui::Ui) {
+        let avail_w = ui.available_width();
+        let avail_h = ui.available_height();
+
+        egui::ScrollArea::vertical()
+            .id_salt("auth_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(avail_w);
+                let card_w = 460.0f32.min(avail_w - 40.0);
+                let pad_top = ((avail_h - 520.0) / 2.0).max(30.0);
+                let pad_left = ((avail_w - card_w) / 2.0).max(10.0);
+
+                ui.add_space(pad_top);
+                ui.horizontal(|ui| {
+                    ui.add_space(pad_left);
+                    ui.vertical(|ui| {
+                        egui::Frame::none()
+                            .fill(SURFACE_1)
+                            .stroke(Stroke::new(1.0_f32, BORDER_LT))
+                            .rounding(Rounding::same(14.0))
+                            .inner_margin(Margin::same(28.0))
+                            .show(ui, |ui| {
+                                ui.set_width(card_w);
+
+                                // Logo y Título
+                                ui.vertical_centered(|ui| {
+                                    let (logo_r, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
+                                    ui.painter().rect_filled(
+                                        logo_r.expand(4.0),
+                                        Rounding::same(14.0),
+                                        Color32::from_rgba_unmultiplied(56, 189, 248, 25),
+                                    );
+                                    ui.painter().rect_filled(logo_r, Rounding::same(10.0), ACCENT);
+                                    ui.painter().text(
+                                        logo_r.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "LILI",
+                                        FontId::proportional(15.0),
+                                        BASE,
+                                    );
+                                    ui.add_space(10.0);
+                                    ui.label(RichText::new("ili enterprise NET").size(22.0).strong().color(TEXT_PRI));
+                                    ui.add_space(2.0);
+                                    ui.label(RichText::new("Control de Acceso y Gestión de Red Segura").size(11.5).color(TEXT_SEC));
+                                    ui.add_space(10.0);
+
+                                    if self.auth_user_count == 0 {
+                                        badge(ui, "🚀 PRIMER INICIO — CREAR ADMINISTRADOR", Color32::from_rgba_unmultiplied(56, 189, 248, 30), ACCENT);
+                                    } else if self.auth_mode_register {
+                                        badge(ui, "📝 REGISTRO DE NUEVO USUARIO", Color32::from_rgba_unmultiplied(167, 139, 250, 30), PURPLE);
+                                    } else {
+                                        badge(ui, "🔑 INICIO DE SESIÓN LOCAL (SQLITE)", Color32::from_rgba_unmultiplied(52, 211, 153, 30), SUCCESS);
+                                    }
+                                });
+
+                                ui.add_space(14.0);
+                                divider(ui);
+                                ui.add_space(14.0);
+
+                                if self.auth_user_count == 0 {
+                                    // ── Formulario de Registro Inicial de Administrador ──
+                                    ui.label(RichText::new("Cree la cuenta principal de Administrador para gestionar el sistema:").size(11.5).color(TEXT_SEC));
+                                    ui.add_space(10.0);
+
+                                    ui.label(RichText::new("NOMBRE COMPLETO").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    custom_text_input(ui, &mut self.auth_reg_fullname, "Ej. Administrador Principal", card_w - 10.0);
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("NOMBRE DE USUARIO (LOGIN)").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    custom_text_input(ui, &mut self.auth_reg_username, "admin", card_w - 10.0);
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("CONTRASEÑA").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    ui.add(egui::TextEdit::singleline(&mut self.auth_reg_password).password(true).desired_width(card_w - 10.0));
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("CONFIRMAR CONTRASEÑA").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    ui.add(egui::TextEdit::singleline(&mut self.auth_reg_confirm_pwd).password(true).desired_width(card_w - 10.0));
+                                    ui.add_space(14.0);
+
+                                    if let Some(err) = &self.auth_error_msg {
+                                        ui.label(RichText::new(format!("✕ {}", err)).size(11.0).color(DANGER));
+                                        ui.add_space(8.0);
+                                    }
+
+                                    if ui.add(
+                                        egui::Button::new(RichText::new("  🚀 CREAR ADMINISTRADOR E INICIAR  ").size(12.5).strong().color(BASE))
+                                            .fill(ACCENT)
+                                            .rounding(Rounding::same(7.0))
+                                            .min_size(Vec2::new(card_w - 8.0, 38.0))
+                                    ).clicked() {
+                                        if self.auth_reg_password != self.auth_reg_confirm_pwd {
+                                            self.auth_error_msg = Some("Las contraseñas no coinciden.".into());
+                                        } else if let Some(db) = &self.auth_db {
+                                            match db.register_user(&self.auth_reg_username, &self.auth_reg_fullname, &self.auth_reg_password, UserRole::Admin) {
+                                                Ok(u) => {
+                                                    self.current_user = Some(u.clone());
+                                                    self.auth_error_msg = None;
+                                                    self.auth_user_count = 1;
+                                                    self.auth_reg_password.clear();
+                                                    self.auth_reg_confirm_pwd.clear();
+                                                    self.reload_admin_users();
+                                                    self.notify(&format!("¡Bienvenido, {}! Cuenta de Administrador creada.", u.full_name), SUCCESS);
+                                                    self.add_log("Seguridad", &format!("Usuario Administrador inicial creado: {}", u.username), SUCCESS);
+                                                }
+                                                Err(e) => {
+                                                    self.auth_error_msg = Some(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if self.auth_mode_register {
+                                    // ── Formulario de Registro de Usuario ──
+                                    ui.label(RichText::new("NOMBRE COMPLETO").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    custom_text_input(ui, &mut self.auth_reg_fullname, "Ej. Juan Pérez", card_w - 10.0);
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("NOMBRE DE USUARIO").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    custom_text_input(ui, &mut self.auth_reg_username, "jperez", card_w - 10.0);
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("ROL EN EL SISTEMA").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    egui::ComboBox::from_id_salt("auth_reg_role_combo")
+                                        .selected_text(self.auth_reg_role.display_name())
+                                        .width(card_w - 10.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.auth_reg_role, UserRole::NetworkTech, "Técnico de Red");
+                                            ui.selectable_value(&mut self.auth_reg_role, UserRole::DomainAdmin, "Administrador de Dominio (AD)");
+                                            ui.selectable_value(&mut self.auth_reg_role, UserRole::FileOperator, "Operador de Archivos");
+                                            ui.selectable_value(&mut self.auth_reg_role, UserRole::Admin, "Administrador");
+                                        });
+                                    ui.label(RichText::new(self.auth_reg_role.description()).size(9.5).color(TEXT_DIM));
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("CONTRASEÑA").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    ui.add(egui::TextEdit::singleline(&mut self.auth_reg_password).password(true).desired_width(card_w - 10.0));
+                                    ui.add_space(8.0);
+
+                                    ui.label(RichText::new("CONFIRMAR CONTRASEÑA").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    ui.add(egui::TextEdit::singleline(&mut self.auth_reg_confirm_pwd).password(true).desired_width(card_w - 10.0));
+                                    ui.add_space(14.0);
+
+                                    if let Some(err) = &self.auth_error_msg {
+                                        ui.label(RichText::new(format!("✕ {}", err)).size(11.0).color(DANGER));
+                                        ui.add_space(8.0);
+                                    }
+
+                                    if ui.add(
+                                        egui::Button::new(RichText::new("  📝 REGISTRAR CUENTA  ").size(12.5).strong().color(BASE))
+                                            .fill(ACCENT)
+                                            .rounding(Rounding::same(7.0))
+                                            .min_size(Vec2::new(card_w - 8.0, 38.0))
+                                    ).clicked() {
+                                        if self.auth_reg_password != self.auth_reg_confirm_pwd {
+                                            self.auth_error_msg = Some("Las contraseñas no coinciden.".into());
+                                        } else if let Some(db) = &self.auth_db {
+                                            match db.register_user(&self.auth_reg_username, &self.auth_reg_fullname, &self.auth_reg_password, self.auth_reg_role) {
+                                                Ok(u) => {
+                                                    self.current_user = Some(u.clone());
+                                                    self.auth_error_msg = None;
+                                                    self.auth_reg_password.clear();
+                                                    self.auth_reg_confirm_pwd.clear();
+                                                    self.reload_admin_users();
+                                                    self.notify(&format!("¡Cuenta registrada con éxito! Bienvenido, {}", u.full_name), SUCCESS);
+                                                    self.add_log("Seguridad", &format!("Usuario registrado: {} ({})", u.username, u.role.display_name()), SUCCESS);
+                                                }
+                                                Err(e) => {
+                                                    self.auth_error_msg = Some(e);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ui.add_space(10.0);
+                                    if ui.add(
+                                        egui::Button::new(RichText::new("← Volver a Iniciar Sesión").size(11.0).color(TEXT_SEC))
+                                            .fill(SURFACE_2)
+                                            .stroke(Stroke::new(1.0_f32, BORDER))
+                                            .rounding(Rounding::same(6.0))
+                                            .min_size(Vec2::new(card_w - 8.0, 30.0))
+                                    ).clicked() {
+                                        self.auth_mode_register = false;
+                                        self.auth_error_msg = None;
+                                    }
+                                } else {
+                                    // ── Formulario de Inicio de Sesión Normal ──
+                                    ui.label(RichText::new("USUARIO").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    custom_text_input(ui, &mut self.auth_login_username, "Nombre de usuario", card_w - 10.0);
+                                    ui.add_space(10.0);
+
+                                    ui.label(RichText::new("CONTRASEÑA").size(9.5).strong().color(TEXT_DIM));
+                                    ui.add_space(3.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.auth_login_password).password(!self.auth_login_show_pwd).desired_width(card_w - 55.0));
+                                        let icon = if self.auth_login_show_pwd { "🙈" } else { "👁" };
+                                        if ui.button(icon).clicked() {
+                                            self.auth_login_show_pwd = !self.auth_login_show_pwd;
+                                        }
+                                    });
+                                    ui.add_space(14.0);
+
+                                    if let Some(err) = &self.auth_error_msg {
+                                        ui.label(RichText::new(format!("✕ {}", err)).size(11.0).color(DANGER));
+                                        ui.add_space(8.0);
+                                    }
+
+                                    let do_login = ui.add(
+                                        egui::Button::new(RichText::new("  🔑 INICIAR SESIÓN  ").size(12.5).strong().color(BASE))
+                                            .fill(ACCENT)
+                                            .rounding(Rounding::same(7.0))
+                                            .min_size(Vec2::new(card_w - 8.0, 38.0))
+                                    ).clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.auth_login_username.is_empty());
+
+                                    if do_login {
+                                        if let Some(db) = &self.auth_db {
+                                            match db.authenticate(&self.auth_login_username, &self.auth_login_password) {
+                                                Ok(u) => {
+                                                    self.current_user = Some(u.clone());
+                                                    self.auth_error_msg = None;
+                                                    self.auth_login_password.clear();
+                                                    self.reload_admin_users();
+                                                    self.notify(&format!("¡Bienvenido, {}!", u.full_name), SUCCESS);
+                                                    self.add_log("Seguridad", &format!("Inicio de sesión exitoso: {} ({})", u.username, u.role.display_name()), SUCCESS);
+                                                }
+                                                Err(e) => {
+                                                    self.auth_error_msg = Some(e);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ui.add_space(14.0);
+                                    divider(ui);
+                                    ui.add_space(10.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("¿No tienes una cuenta en este equipo?").size(10.5).color(TEXT_DIM));
+                                        if ui.add(egui::Button::new(RichText::new("Registrar Usuario").size(10.5).color(ACCENT)).frame(false)).clicked() {
+                                            self.auth_mode_register = true;
+                                            self.auth_error_msg = None;
+                                        }
+                                    });
+                                }
+
+                                ui.add_space(12.0);
+                                ui.label(RichText::new("Base de datos local SQLite protegida con HMAC/SHA-256.").size(9.0).color(TEXT_DIM));
+                            });
+                    });
+                });
+            });
+    }
+
+    fn ui_user_management(&mut self, ui: &mut egui::Ui, pad: f32) {
+        if let Some(user) = &self.current_user.clone() {
+            if user.role != UserRole::Admin {
+                return;
+            }
+
+            ui.add_space(20.0);
+            ui.horizontal(|ui| {
+                ui.add_space(pad);
+                let total_w = ui.available_width() - pad;
+                egui::Frame::none()
+                    .fill(SURFACE_1)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .rounding(Rounding::same(10.0))
+                    .inner_margin(Margin::same(18.0))
+                    .show(ui, |ui| {
+                        ui.set_width(total_w - 36.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("👥 GESTIÓN DE USUARIOS Y ROLES (BASE DE DATOS LOCAL SQLITE)").size(12.0).strong().color(ACCENT));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let add_txt = if self.admin_show_create_modal { "✕ Cancelar Nuevo Usuario" } else { "➕ Registrar Nuevo Usuario" };
+                                if ui.add(
+                                    egui::Button::new(RichText::new(add_txt).size(11.0).strong().color(BASE))
+                                        .fill(ACCENT)
+                                        .rounding(Rounding::same(6.0))
+                                ).clicked() {
+                                    self.admin_show_create_modal = !self.admin_show_create_modal;
+                                    self.admin_user_msg = None;
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        divider(ui);
+                        ui.add_space(10.0);
+
+                        // Formulario de creación desplegable
+                        if self.admin_show_create_modal {
+                            egui::Frame::none()
+                                .fill(SURFACE_2)
+                                .stroke(Stroke::new(1.0_f32, BORDER_LT))
+                                .rounding(Rounding::same(8.0))
+                                .inner_margin(Margin::same(14.0))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("Crear Nuevo Usuario Local").size(12.0).strong().color(TEXT_PRI));
+                                    ui.add_space(8.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new("Nombre Completo:").size(10.0).color(TEXT_DIM));
+                                            custom_text_input(ui, &mut self.admin_new_fullname, "Ej. María García", 200.0);
+                                        });
+                                        ui.add_space(10.0);
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new("Usuario (Login):").size(10.0).color(TEXT_DIM));
+                                            custom_text_input(ui, &mut self.admin_new_username, "Ej. mgarcia", 160.0);
+                                        });
+                                        ui.add_space(10.0);
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new("Contraseña Inicial:").size(10.0).color(TEXT_DIM));
+                                            ui.add(egui::TextEdit::singleline(&mut self.admin_new_password).password(true).desired_width(160.0));
+                                        });
+                                        ui.add_space(10.0);
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new("Rol Asignado:").size(10.0).color(TEXT_DIM));
+                                            egui::ComboBox::from_id_salt("admin_create_role_combo")
+                                                .selected_text(self.admin_new_role.display_name())
+                                                .width(180.0)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut self.admin_new_role, UserRole::NetworkTech, "Técnico de Red");
+                                                    ui.selectable_value(&mut self.admin_new_role, UserRole::DomainAdmin, "Administrador de Dominio (AD)");
+                                                    ui.selectable_value(&mut self.admin_new_role, UserRole::FileOperator, "Operador de Archivos");
+                                                    ui.selectable_value(&mut self.admin_new_role, UserRole::Admin, "Administrador");
+                                                });
+                                        });
+                                        ui.add_space(12.0);
+                                        ui.vertical(|ui| {
+                                            ui.add_space(14.0);
+                                            if ui.add(
+                                                egui::Button::new(RichText::new("Guardar").size(11.0).strong().color(BASE))
+                                                    .fill(SUCCESS)
+                                                    .rounding(Rounding::same(5.0))
+                                                    .min_size(Vec2::new(90.0, 26.0))
+                                            ).clicked() {
+                                                if let Some(db) = &self.auth_db {
+                                                    match db.register_user(&self.admin_new_username, &self.admin_new_fullname, &self.admin_new_password, self.admin_new_role) {
+                                                        Ok(_) => {
+                                                            self.admin_user_msg = Some(("Usuario registrado con éxito.".into(), SUCCESS));
+                                                            self.admin_new_fullname.clear();
+                                                            self.admin_new_username.clear();
+                                                            self.admin_new_password.clear();
+                                                            self.admin_show_create_modal = false;
+                                                            self.reload_admin_users();
+                                                            self.notify("Usuario creado correctamente", SUCCESS);
+                                                        }
+                                                        Err(e) => {
+                                                            self.admin_user_msg = Some((e, DANGER));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.label(RichText::new(self.admin_new_role.description()).size(9.5).color(TEXT_DIM));
+                                });
+                            ui.add_space(10.0);
+                        }
+
+                        if let Some((msg, col)) = &self.admin_user_msg {
+                            ui.label(RichText::new(msg).size(11.0).color(*col));
+                            ui.add_space(8.0);
+                        }
+
+                        // Tabla de usuarios registrados
+                        let mut user_to_delete = None;
+                        let mut role_change = None;
+
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("ID").size(10.0).strong().color(TEXT_DIM));
+                            ui.add_space(16.0);
+                            ui.label(RichText::new("USUARIO").size(10.0).strong().color(TEXT_DIM));
+                            ui.add_space(90.0);
+                            ui.label(RichText::new("NOMBRE COMPLETO").size(10.0).strong().color(TEXT_DIM));
+                            ui.add_space(120.0);
+                            ui.label(RichText::new("ROL").size(10.0).strong().color(TEXT_DIM));
+                            ui.add_space(140.0);
+                            ui.label(RichText::new("REGISTRADO").size(10.0).strong().color(TEXT_DIM));
+                            ui.add_space(60.0);
+                            ui.label(RichText::new("ÚLTIMO ACCESO").size(10.0).strong().color(TEXT_DIM));
+                        });
+                        ui.add_space(4.0);
+                        divider(ui);
+                        ui.add_space(4.0);
+
+                        let users = self.admin_user_list.clone();
+                        for u in &users {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("#{}", u.id)).size(10.5).color(TEXT_DIM));
+                                ui.add_space(16.0);
+                                ui.label(RichText::new(&u.username).size(11.5).strong().color(TEXT_PRI));
+                                ui.add_space(60.0);
+                                ui.label(RichText::new(&u.full_name).size(11.5).color(TEXT_SEC));
+                                ui.add_space(40.0);
+
+                                // Rol ComboBox editable
+                                let mut curr_role = u.role;
+                                let combo_id = format!("user_role_combo_{}", u.id);
+                                let role_color = match u.role {
+                                    UserRole::Admin => ACCENT,
+                                    UserRole::NetworkTech => TEAL,
+                                    UserRole::DomainAdmin => PURPLE,
+                                    UserRole::FileOperator => ORANGE,
+                                };
+                                egui::ComboBox::from_id_salt(combo_id)
+                                    .selected_text(RichText::new(curr_role.display_name()).color(role_color))
+                                    .width(170.0)
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_value(&mut curr_role, UserRole::NetworkTech, "Técnico de Red").clicked() {
+                                            role_change = Some((u.id, UserRole::NetworkTech));
+                                        }
+                                        if ui.selectable_value(&mut curr_role, UserRole::DomainAdmin, "Administrador de Dominio (AD)").clicked() {
+                                            role_change = Some((u.id, UserRole::DomainAdmin));
+                                        }
+                                        if ui.selectable_value(&mut curr_role, UserRole::FileOperator, "Operador de Archivos").clicked() {
+                                            role_change = Some((u.id, UserRole::FileOperator));
+                                        }
+                                        if ui.selectable_value(&mut curr_role, UserRole::Admin, "Administrador").clicked() {
+                                            role_change = Some((u.id, UserRole::Admin));
+                                        }
+                                    });
+
+                                ui.add_space(10.0);
+                                ui.label(RichText::new(&u.created_at).size(10.0).color(TEXT_DIM));
+                                ui.add_space(10.0);
+                                let last_str = u.last_login.as_deref().unwrap_or("Nunca");
+                                ui.label(RichText::new(last_str).size(10.0).color(TEXT_DIM));
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if u.id != user.id {
+                                        if ui.add(
+                                            egui::Button::new(RichText::new("Eliminar").size(10.0).color(DANGER))
+                                                .fill(Color32::from_rgba_unmultiplied(248, 113, 113, 20))
+                                                .stroke(Stroke::new(1.0_f32, DANGER))
+                                                .rounding(Rounding::same(4.0))
+                                        ).on_hover_text("Eliminar este usuario de la base de datos").clicked() {
+                                            user_to_delete = Some(u.id);
+                                        }
+                                    } else {
+                                        badge(ui, "TU CUENTA", Color32::from_rgba_unmultiplied(56, 189, 248, 20), ACCENT);
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+                        }
+
+                        if let Some((uid, new_r)) = role_change {
+                            if let Some(db) = &self.auth_db {
+                                let _ = db.change_role(uid, new_r);
+                                self.reload_admin_users();
+                                self.notify("Rol de usuario actualizado", SUCCESS);
+                            }
+                        }
+
+                        if let Some(uid) = user_to_delete {
+                            if let Some(db) = &self.auth_db {
+                                let _ = db.delete_user(uid);
+                                self.reload_admin_users();
+                                self.notify("Usuario eliminado de la base de datos", WARNING);
+                            }
+                        }
+                    });
+            });
+        }
+    }
+
     // ── Pantalla de Activación Corporativa (Serial Key Gatekeeper) ─────────────
     fn ui_activation_view(&mut self, ui: &mut egui::Ui) {
         let avail_w = ui.available_width();
@@ -9171,13 +9917,55 @@ impl LanternApp {
                                 divider(ui);
                                 ui.add_space(18.0);
 
+                                if let Some(u) = &self.current_user.clone() {
+                                    egui::Frame::none()
+                                        .fill(SURFACE_2)
+                                        .stroke(Stroke::new(1.0_f32, BORDER))
+                                        .rounding(Rounding::same(8.0))
+                                        .inner_margin(Margin::symmetric(14.0, 8.0))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("👤").size(14.0));
+                                                ui.label(RichText::new(format!("Sesión iniciada: {} ({})", u.full_name, u.role.display_name())).size(11.5).strong().color(TEXT_PRI));
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.add(
+                                                        egui::Button::new(RichText::new("🚪 Cerrar Sesión").size(10.5).color(DANGER))
+                                                            .fill(SURFACE_1)
+                                                            .stroke(Stroke::new(1.0_f32, DANGER))
+                                                            .rounding(Rounding::same(5.0))
+                                                    ).clicked() {
+                                                        self.current_user = None;
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    ui.add_space(14.0);
+                                }
+
                                 ui.label(
-                                    RichText::new("Para habilitar el escaneo ICMP/TCP de red en vivo, detección de equipos encendidos y apagados, auditoría de puertos y asistencia remota directa, ingrese una clave serial autorizada.")
+                                    RichText::new("Ingrese una clave serial autorizada para el módulo o suite que desee activar en este equipo:")
                                         .size(12.0)
                                         .color(TEXT_SEC),
                                 );
+                                ui.add_space(8.0);
 
-                                ui.add_space(18.0);
+                                egui::Frame::none()
+                                    .fill(SURFACE_2)
+                                    .stroke(Stroke::new(1.0_f32, BORDER))
+                                    .rounding(Rounding::same(7.0))
+                                    .inner_margin(Margin::symmetric(12.0, 8.0))
+                                    .show(ui, |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new("TIPOS DE LICENCIAS DISPONIBLES:").size(9.5).strong().color(ACCENT));
+                                            ui.add_space(3.0);
+                                            ui.label(RichText::new("• ILI-ENT1-...  Suite Completa Enterprise (Red + Active Directory + Servidor de Archivos)").size(10.0).color(TEXT_SEC));
+                                            ui.label(RichText::new("• ILI-NET1-...  Módulo Control de Red (Escaneo, Equipos, Puertos, WoL, MSOI Office)").size(10.0).color(TEXT_SEC));
+                                            ui.label(RichText::new("• ILI-DIR1-...  Módulo Active Directory (Gestión de Dominio, Usuarios y Grupos)").size(10.0).color(TEXT_SEC));
+                                            ui.label(RichText::new("• ILI-SRV1-...  Módulo Servidor de Archivos (Shares, Permisos NTFS, Analizador, VSS)").size(10.0).color(TEXT_SEC));
+                                        });
+                                    });
+
+                                ui.add_space(14.0);
 
                                 // Campo de entrada para el serial
                                 ui.label(RichText::new("CÓDIGO SERIAL DE ACTIVACIÓN (FORMATO: ILI-XXXX-XXXX-XXXX-XXXX)").size(10.0).strong().color(ACCENT));
@@ -10026,6 +10814,26 @@ impl eframe::App for LanternApp {
                 }
             }
         }
+        // ── 1. Puerta de Autenticación de Usuario (Login / Registro SQLite Local) ───
+        if self.current_user.is_none() {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(BASE))
+                .show(ctx, |ui| {
+                    self.ui_auth_view(ui);
+                });
+            return;
+        }
+
+        // ── 2. Puerta de Activación de Licencia / Prueba Gratuita ─────────────────────
+        if self.license.is_none() {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(BASE))
+                .show(ctx, |ui| {
+                    self.ui_activation_view(ui);
+                });
+            return;
+        }
+
         // Redibujar frecuentemente al escanear, sincronizar AD / Servidor de Archivos, o cada 2s para la notificación
         if self.scanning || self.ad_loading || self.fs_loading || self.fs_heavy_loading || self.updater_checking || self.updater_downloading || self.msoi_deploying {
             ctx.request_repaint_after(Duration::from_millis(60));
@@ -10101,44 +10909,76 @@ impl eframe::App for LanternApp {
                 });
         }
 
-        // Área Central Principal
+        // Área Central Principal con Validación de Roles y Licencias por Módulo
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BASE))
             .show(ctx, |ui| {
-                if self.license.is_none() {
-                    self.ui_activation_view(ui);
-                } else {
-                    match self.active_tab {
-                        0 => {
-                            egui::ScrollArea::vertical()
-                                .id_salt("overview_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| self.ui_view_overview(ui));
-                        }
-                        1 => {
+                match self.active_tab {
+                    0 => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("overview_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.ui_view_overview(ui));
+                    }
+                    1 => {
+                        if let Some(u) = &self.current_user {
+                            if !u.role.can_access_network() {
+                                self.ui_role_forbidden(ui, "Técnico de Red o Administrador");
+                            } else if let Some(lic) = &self.license {
+                                if !lic.has_network {
+                                    self.ui_license_forbidden(ui, "Control de Red y Escáner", "ILI-NET1-");
+                                } else {
+                                    self.ui_view_devices(ui);
+                                }
+                            }
+                        } else {
                             self.ui_view_devices(ui);
                         }
-                        2 => {
+                    }
+                    2 => {
+                        if let Some(u) = &self.current_user {
+                            if !u.role.can_access_ad() {
+                                self.ui_role_forbidden(ui, "Administrador de Dominio (AD) o Administrador");
+                            } else if let Some(lic) = &self.license {
+                                if !lic.has_activedirectory {
+                                    self.ui_license_forbidden(ui, "Active Directory y Dominio", "ILI-DIR1-");
+                                } else {
+                                    self.ui_view_active_directory(ui);
+                                }
+                            }
+                        } else {
                             self.ui_view_active_directory(ui);
                         }
-                        3 => {
+                    }
+                    3 => {
+                        if let Some(u) = &self.current_user {
+                            if !u.role.can_access_fileserver() {
+                                self.ui_role_forbidden(ui, "Operador de Archivos o Administrador");
+                            } else if let Some(lic) = &self.license {
+                                if !lic.has_fileserver {
+                                    self.ui_license_forbidden(ui, "Servidor de Archivos y Almacenamiento", "ILI-SRV1-");
+                                } else {
+                                    self.ui_view_file_server(ui);
+                                }
+                            }
+                        } else {
                             self.ui_view_file_server(ui);
                         }
-                        4 => {
-                            egui::ScrollArea::vertical()
-                                .id_salt("activity_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| self.ui_view_activity(ui));
-                        }
-                        5 => {
-                            egui::ScrollArea::vertical()
-                                .id_salt("settings_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| self.ui_view_settings(ui));
-                        }
-                        _ => {
-                            self.ui_view_overview(ui);
-                        }
+                    }
+                    4 => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("activity_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.ui_view_activity(ui));
+                    }
+                    5 => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("settings_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.ui_view_settings(ui));
+                    }
+                    _ => {
+                        self.ui_view_overview(ui);
                     }
                 }
             });

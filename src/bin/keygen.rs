@@ -88,6 +88,9 @@ fn main() {
         // Uso por linea de comando: keygen [EDICION] [CANTIDAD] [ARCHIVO_SALIDA]
         let p = match args[1].to_ascii_uppercase().as_str() {
             "ENT" | "ENT1" => "ENT1",
+            "NET" | "NET1" => "NET1",
+            "DIR" | "DIR1" => "DIR1",
+            "SRV" | "SRV1" => "SRV1",
             "CORP" => "CORP",
             "PRO" | "PRO1" => "PRO1",
             "DEMO" => "DEMO",
@@ -106,19 +109,23 @@ fn main() {
         // Modo interactivo
         print_header();
         println!("Seleccione la edicion de licencia:");
-        println!("  [1] ENT1 — Edicion Corporativa Enterprise (Recomendada)");
-        println!("  [2] CORP — Licencia Corporativa Ilimitada");
-        println!("  [3] PRO1 — Edicion Profesional Avanzada");
-        println!("  [4] DEMO — Licencia de Demostracion / Pruebas");
-        print!("\nIngrese opcion (1-4, por defecto 1): ");
+        println!("  [1] ENT1 — Suite Completa Enterprise (Red + Active Directory + Servidor de Archivos)");
+        println!("  [2] NET1 — Modulo Control de Red (Escaner, Puertos, WoL, MSOI Office)");
+        println!("  [3] DIR1 — Modulo Active Directory (Usuarios, Grupos, Equipos, Politicas)");
+        println!("  [4] SRV1 — Modulo Servidor de Archivos (Shares, Permisos NTFS, Analizador, VSS)");
+        println!("  [5] CORP — Licencia Corporativa Ilimitada (Suite Total)");
+        println!("  [6] DEMO — Licencia de Demostracion / Pruebas");
+        print!("\nIngrese opcion (1-6, por defecto 1): ");
         let _ = io::stdout().flush();
 
         let mut input = String::new();
         let _ = io::stdin().read_line(&mut input);
         let p = match input.trim() {
-            "2" => "CORP",
-            "3" => "PRO1",
-            "4" => "DEMO",
+            "2" => "NET1",
+            "3" => "DIR1",
+            "4" => "SRV1",
+            "5" => "CORP",
+            "6" => "DEMO",
             _ => "ENT1",
         };
 
@@ -132,9 +139,12 @@ fn main() {
     };
 
     let edicion_nombre = match prefix.as_str() {
-        "ENT1" => "ili enterprise NET — Edicion Corporativa Enterprise",
+        "ENT1" => "ili enterprise NET — Suite Completa Enterprise",
+        "NET1" => "ili enterprise NET — Modulo Control de Red",
+        "DIR1" => "ili enterprise NET — Modulo Active Directory",
+        "SRV1" => "ili enterprise NET — Modulo Servidor de Archivos",
         "CORP" => "ili enterprise NET — Licencia Corporativa Ilimitada",
-        "PRO1" => "ili enterprise NET — Edicion Profesional Avanzada",
+        "PRO1" => "ili enterprise NET — Edicion Profesional (Red + Archivos)",
         "DEMO" => "ili enterprise NET — Licencia de Demostracion / Evaluacion",
         _ => "ili enterprise NET — Licencia Comercial Especial",
     };

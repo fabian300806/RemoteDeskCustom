@@ -7,7 +7,7 @@
 #>
 
 param(
-    [ValidateSet('ENT1', 'CORP', 'PRO1', 'DEMO')]
+    [ValidateSet('ENT1', 'NET1', 'DIR1', 'SRV1', 'CORP', 'PRO1', 'DEMO')]
     [string]$Edicion = '',
 
     [int]$Cantidad = 0,
@@ -61,16 +61,20 @@ if ([string]::IsNullOrWhiteSpace($Edicion)) {
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Seleccione la edicion de licencia que desea generar:" -ForegroundColor Yellow
-    Write-Host "  [1] ENT1 - Edicion Corporativa Enterprise (Recomendada)" -ForegroundColor White
-    Write-Host "  [2] CORP - Licencia Corporativa Ilimitada" -ForegroundColor White
-    Write-Host "  [3] PRO1 - Edicion Profesional Avanzada" -ForegroundColor White
-    Write-Host "  [4] DEMO - Licencia de Demostracion / Pruebas" -ForegroundColor White
+    Write-Host "  [1] ENT1 - Suite Completa Enterprise (Red + Active Directory + Servidor de Archivos)" -ForegroundColor White
+    Write-Host "  [2] NET1 - Modulo Control de Red (Escaner, Puertos, WoL, MSOI Office)" -ForegroundColor White
+    Write-Host "  [3] DIR1 - Modulo Active Directory (Usuarios, Grupos, Equipos, Politicas)" -ForegroundColor White
+    Write-Host "  [4] SRV1 - Modulo Servidor de Archivos (Shares, Permisos NTFS, Analizador, VSS)" -ForegroundColor White
+    Write-Host "  [5] CORP - Licencia Corporativa Ilimitada (Suite Total)" -ForegroundColor White
+    Write-Host "  [6] DEMO - Licencia de Demostracion / Pruebas" -ForegroundColor White
     Write-Host ""
-    $opcion = Read-Host "Ingrese opcion (1-4, por defecto 1)"
+    $opcion = Read-Host "Ingrese opcion (1-6, por defecto 1)"
     switch ($opcion) {
-        '2' { $Edicion = 'CORP' }
-        '3' { $Edicion = 'PRO1' }
-        '4' { $Edicion = 'DEMO' }
+        '2' { $Edicion = 'NET1' }
+        '3' { $Edicion = 'DIR1' }
+        '4' { $Edicion = 'SRV1' }
+        '5' { $Edicion = 'CORP' }
+        '6' { $Edicion = 'DEMO' }
         default { $Edicion = 'ENT1' }
     }
 }
@@ -85,9 +89,12 @@ if ($Cantidad -le 0) {
 }
 
 $nombreEdicion = switch ($Edicion) {
-    'ENT1' { 'Lili enterprise NET - Edicion Corporativa Enterprise' }
+    'ENT1' { 'Lili enterprise NET - Suite Completa Enterprise' }
+    'NET1' { 'Lili enterprise NET - Modulo Control de Red' }
+    'DIR1' { 'Lili enterprise NET - Modulo Active Directory' }
+    'SRV1' { 'Lili enterprise NET - Modulo Servidor de Archivos' }
     'CORP' { 'Lili enterprise NET - Licencia Corporativa Ilimitada' }
-    'PRO1' { 'Lili enterprise NET - Edicion Profesional Avanzada' }
+    'PRO1' { 'Lili enterprise NET - Edicion Profesional (Red + Archivos)' }
     'DEMO' { 'Lili enterprise NET - Licencia de Demostracion' }
     default { 'Lili enterprise NET - Licencia Oficial' }
 }
