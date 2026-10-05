@@ -837,6 +837,7 @@ struct LanternApp {
     msoi_deploying: bool,
     msoi_status_msg: Option<(String, Color32)>,
     msoi_receiver: Option<Receiver<Result<String, String>>>,
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 impl Default for LanternApp {
@@ -1077,6 +1078,7 @@ impl Default for LanternApp {
             msoi_deploying: false,
             msoi_status_msg: None,
             msoi_receiver: None,
+            logo_texture: None,
         };
 
         if let Some(lic) = &saved_license {
@@ -1663,27 +1665,42 @@ impl LanternApp {
             ui.horizontal_centered(|ui| {
                 ui.add_space(20.0);
 
-                // Logomarca vectorial con glow
+                // Logomarca con el nuevo logo de Lili enterprise NET
                 let logo_rect = egui::Rect::from_min_size(
-                    ui.cursor().min + Vec2::new(0.0, 13.0),
-                    Vec2::splat(32.0),
+                    ui.cursor().min + Vec2::new(0.0, 10.0),
+                    Vec2::splat(38.0),
                 );
                 ui.advance_cursor_after_rect(logo_rect);
                 let p = ui.painter();
-                // Sombra / glow efecto
-                p.rect_filled(
-                    logo_rect.expand(3.0),
-                    Rounding::same(11.0),
-                    Color32::from_rgba_unmultiplied(56, 189, 248, 18),
-                );
-                p.rect_filled(logo_rect, Rounding::same(8.0), ACCENT);
-                p.text(
-                    logo_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "LILI",
-                    FontId::proportional(13.0),
-                    BASE,
-                );
+                if let Some(tex) = &self.logo_texture {
+                    p.rect_filled(
+                        logo_rect.expand(2.5),
+                        Rounding::same(10.0),
+                        Color32::from_rgba_unmultiplied(56, 189, 248, 25),
+                    );
+                    p.rect_filled(logo_rect, Rounding::same(8.0), Color32::BLACK);
+                    p.image(
+                        tex.id(),
+                        logo_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    p.rect_stroke(logo_rect, Rounding::same(8.0), Stroke::new(1.0_f32, ACCENT_DIM));
+                } else {
+                    p.rect_filled(
+                        logo_rect.expand(3.0),
+                        Rounding::same(11.0),
+                        Color32::from_rgba_unmultiplied(56, 189, 248, 18),
+                    );
+                    p.rect_filled(logo_rect, Rounding::same(8.0), ACCENT);
+                    p.text(
+                        logo_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "LILI",
+                        FontId::proportional(13.0),
+                        BASE,
+                    );
+                }
 
                 ui.add_space(14.0);
                 ui.vertical(|ui| {
@@ -9414,20 +9431,36 @@ impl LanternApp {
 
                                 // Logo y Título
                                 ui.vertical_centered(|ui| {
-                                    let (logo_r, _) = ui.allocate_exact_size(Vec2::splat(48.0), egui::Sense::hover());
-                                    ui.painter().rect_filled(
-                                        logo_r.expand(4.0),
-                                        Rounding::same(14.0),
-                                        Color32::from_rgba_unmultiplied(56, 189, 248, 25),
-                                    );
-                                    ui.painter().rect_filled(logo_r, Rounding::same(10.0), ACCENT);
-                                    ui.painter().text(
-                                        logo_r.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "LILI",
-                                        FontId::proportional(15.0),
-                                        BASE,
-                                    );
+                                    let (logo_r, _) = ui.allocate_exact_size(Vec2::splat(68.0), egui::Sense::hover());
+                                    if let Some(tex) = &self.logo_texture {
+                                        ui.painter().rect_filled(
+                                            logo_r.expand(4.0),
+                                            Rounding::same(18.0),
+                                            Color32::from_rgba_unmultiplied(56, 189, 248, 30),
+                                        );
+                                        ui.painter().rect_filled(logo_r, Rounding::same(14.0), Color32::BLACK);
+                                        ui.painter().image(
+                                            tex.id(),
+                                            logo_r,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            Color32::WHITE,
+                                        );
+                                        ui.painter().rect_stroke(logo_r, Rounding::same(14.0), Stroke::new(1.2_f32, ACCENT));
+                                    } else {
+                                        ui.painter().rect_filled(
+                                            logo_r.expand(4.0),
+                                            Rounding::same(14.0),
+                                            Color32::from_rgba_unmultiplied(56, 189, 248, 25),
+                                        );
+                                        ui.painter().rect_filled(logo_r, Rounding::same(10.0), ACCENT);
+                                        ui.painter().text(
+                                            logo_r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            "LILI",
+                                            FontId::proportional(15.0),
+                                            BASE,
+                                        );
+                                    }
                                     ui.add_space(10.0);
                                     ui.label(RichText::new("Lili enterprise NET").size(22.0).strong().color(TEXT_PRI));
                                     ui.add_space(2.0);
@@ -9893,20 +9926,36 @@ impl LanternApp {
 
                                 // 1. Header con Escudo / Logo LILI
                                 ui.vertical_centered(|ui| {
-                                    let (logo_r, _) = ui.allocate_exact_size(Vec2::splat(52.0), egui::Sense::hover());
-                                    ui.painter().rect_filled(
-                                        logo_r.expand(5.0),
-                                        Rounding::same(16.0),
-                                        Color32::from_rgba_unmultiplied(56, 189, 248, 22),
-                                    );
-                                    ui.painter().rect_filled(logo_r, Rounding::same(12.0), ACCENT);
-                                    ui.painter().text(
-                                        logo_r.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "LILI",
-                                        FontId::proportional(16.0),
-                                        BASE,
-                                    );
+                                    let (logo_r, _) = ui.allocate_exact_size(Vec2::splat(68.0), egui::Sense::hover());
+                                    if let Some(tex) = &self.logo_texture {
+                                        ui.painter().rect_filled(
+                                            logo_r.expand(4.0),
+                                            Rounding::same(18.0),
+                                            Color32::from_rgba_unmultiplied(56, 189, 248, 30),
+                                        );
+                                        ui.painter().rect_filled(logo_r, Rounding::same(14.0), Color32::BLACK);
+                                        ui.painter().image(
+                                            tex.id(),
+                                            logo_r,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            Color32::WHITE,
+                                        );
+                                        ui.painter().rect_stroke(logo_r, Rounding::same(14.0), Stroke::new(1.2_f32, ACCENT));
+                                    } else {
+                                        ui.painter().rect_filled(
+                                            logo_r.expand(5.0),
+                                            Rounding::same(16.0),
+                                            Color32::from_rgba_unmultiplied(56, 189, 248, 22),
+                                        );
+                                        ui.painter().rect_filled(logo_r, Rounding::same(12.0), ACCENT);
+                                        ui.painter().text(
+                                            logo_r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            "LILI",
+                                            FontId::proportional(16.0),
+                                            BASE,
+                                        );
+                                    }
 
                                     ui.add_space(14.0);
                                     ui.label(RichText::new("Lili enterprise NET").size(24.0).strong().color(TEXT_PRI));
@@ -10790,6 +10839,9 @@ if ($isLocal) {{
 // ── eframe::App Implementation ────────────────────────────────────────────────
 impl eframe::App for LanternApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.logo_texture.is_none() {
+            self.logo_texture = load_logo_texture(ctx);
+        }
         if ctx.theme() != egui::Theme::Dark || ctx.style().visuals.window_fill() != SURFACE {
             ctx.set_theme(egui::ThemePreference::Dark);
             ctx.all_styles_mut(|s| {
@@ -14239,6 +14291,34 @@ if ($isLocal) {{
     }
 }
 
+// ── Logo e Icono de Lili enterprise NET ──────────────────────────────────────────
+fn load_app_icon() -> Option<egui::IconData> {
+    let png_bytes = include_bytes!("../assets/logo.png");
+    if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+        let resized = dyn_img.resize_exact(64, 64, image::imageops::FilterType::Lanczos3);
+        let rgba = resized.to_rgba8();
+        Some(egui::IconData {
+            width: 64,
+            height: 64,
+            rgba: rgba.into_raw(),
+        })
+    } else {
+        None
+    }
+}
+
+fn load_logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let png_bytes = include_bytes!("../assets/logo.png");
+    if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+        let rgba = dyn_img.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        Some(ctx.load_texture("lili_logo", color_image, egui::TextureOptions::LINEAR))
+    } else {
+        None
+    }
+}
+
 // ── Punto de Entrada de la Aplicación ─────────────────────────────────────────
 fn main() -> eframe::Result<()> {
     std::panic::set_hook(Box::new(|info| {
@@ -14250,11 +14330,17 @@ fn main() -> eframe::Result<()> {
         eprintln!("{}", msg);
     }));
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 840.0])
+        .with_min_inner_size([1000.0, 680.0])
+        .with_title("Lili enterprise NET — Inteligencia y Control de Red");
+
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 840.0])
-            .with_min_inner_size([1000.0, 680.0])
-            .with_title("Lili enterprise NET — Inteligencia y Control de Red"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native("Lili enterprise NET", options, Box::new(|cc| {
