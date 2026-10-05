@@ -9379,24 +9379,36 @@ impl LanternApp {
 
         let inner_script = format!(
             r#"$Host.UI.RawUI.WindowTitle = 'Lili Enterprise NET — Instalador Office MSOI ({host})'
-Write-Host '[Lili NET] Consola de Administrador iniciada para: {host}' -ForegroundColor Cyan
 $h = '{host}'
 $u = '{script_url}'
-if (Test-Connection -ComputerName $h -Count 1 -Quiet) {{
-    Write-Host '[Lili NET] Conexión establecida con '$h'. Iniciando sesión remota...' -ForegroundColor Green
+$isLocal = ($h -eq '127.0.0.1' -or $h -eq 'localhost' -or $h -eq $env:COMPUTERNAME -or $h -eq $env:COMPUTERNAME.ToLower())
+
+if ($isLocal) {{
+    Write-Host "[Lili NET] Consola de Administrador iniciada para equipo local ($h)" -ForegroundColor Cyan
     try {{
-        Enter-PSSession -ComputerName $h
+        $scriptContent = (Invoke-RestMethod $u)
+        $cleanScript = $scriptContent -replace '\$script:isAdmin\s*=.*', '$script:isAdmin = $true'
+        Invoke-Expression $cleanScript
     }} catch {{
-        Write-Host '[!] No se pudo abrir PSSession directa: ' $_.Exception.Message -ForegroundColor Yellow
+        Write-Host '[!] Error al ejecutar MSOI: ' $_.Exception.Message -ForegroundColor Red
     }}
-}}
-Write-Host '[Lili NET] Descargando e iniciando MSOI con permisos de Administrador...' -ForegroundColor Green
-try {{
-    $scriptContent = (Invoke-RestMethod $u)
-    $cleanScript = $scriptContent -replace '\$script:isAdmin\s*=.*', '$script:isAdmin = $true'
-    Invoke-Expression $cleanScript
-}} catch {{
-    Write-Host '[!] Error al ejecutar MSOI: ' $_.Exception.Message -ForegroundColor Red
+}} else {{
+    Write-Host "[Lili NET] Conectando directamente con equipo remoto $h..." -ForegroundColor Cyan
+    if (Test-Connection -ComputerName $h -Count 1 -Quiet) {{
+        Write-Host "[Lili NET] Conexión establecida. Ejecutando MSOI en $h..." -ForegroundColor Green
+        Invoke-Command -ComputerName $h -ScriptBlock {{
+            param($scriptUrl)
+            try {{
+                $scriptContent = (Invoke-RestMethod $scriptUrl)
+                $cleanScript = $scriptContent -replace '\$script:isAdmin\s*=.*', '$script:isAdmin = $true'
+                Invoke-Expression $cleanScript
+            }} catch {{
+                Write-Host '[!] Error al ejecutar MSOI remoto: ' $_.Exception.Message -ForegroundColor Red
+            }}
+        }} -ArgumentList $u
+    }} else {{
+        Write-Host "[!] El equipo remoto $h no responde a ping." -ForegroundColor Red
+    }}
 }}
 "#,
             host = ps_escape(&host),
@@ -13064,7 +13076,14 @@ $sb = {{
 
     $p = Start-Process -FilePath $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
     if ($p.ExitCode -ne 0) {{
-        throw "El instalador setup.exe devolvió código de error $($p.ExitCode)"
+        # Si setup falló (ej. código -1 por conflicto de versión ya instalada), limpiar versión previa y reintentar
+        $cleanXml = "<Configuration><Remove All=`"TRUE`" /><Display Level=`"None`" AcceptEULA=`"TRUE`" /></Configuration>"
+        [System.IO.File]::WriteAllText("$deployDir\clean.xml", $cleanXml)
+        Start-Process -FilePath $setupExe -ArgumentList "/configure `"$deployDir\clean.xml`"" -Wait -NoNewWindow
+        $p = Start-Process -FilePath $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
+        if ($p.ExitCode -ne 0) {{
+            throw "El instalador setup.exe devolvió código de error $($p.ExitCode) tras reintento de limpieza"
+        }}
     }}
 
     Remove-Item $deployDir -Recurse -Force -ErrorAction SilentlyContinue
