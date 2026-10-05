@@ -9376,15 +9376,52 @@ impl LanternApp {
         } else {
             "https://aldagou.github.io/MSOI/MSOICLI.ps1"
         };
-        let ps_cmd = format!(
-            "$h='{}'; Write-Host \"[Lili NET] Conectando con $h para instalador Office MSOI...\" -ForegroundColor Cyan; if (Test-Connection -ComputerName $h -Count 1 -Quiet) {{ Write-Host \"Conexión establecida con $h. Iniciando MSOI interactivo...\" -ForegroundColor Green; Enter-PSSession -ComputerName $h; irm {} | iex }} else {{ Write-Host \"No se pudo conectar a $h. Abriendo instalador MSOI localmente...\" -ForegroundColor Yellow; irm {} | iex }}",
-            host, script_url, script_url
+
+        let inner_script = format!(
+            r#"$Host.UI.RawUI.WindowTitle = 'Lili Enterprise NET — Instalador Office MSOI ({host})'
+Write-Host '[Lili NET] Consola de Administrador iniciada para: {host}' -ForegroundColor Cyan
+$h = '{host}'
+$u = '{script_url}'
+if (Test-Connection -ComputerName $h -Count 1 -Quiet) {{
+    Write-Host '[Lili NET] Conexión establecida con '$h'. Iniciando sesión remota...' -ForegroundColor Green
+    try {{
+        Enter-PSSession -ComputerName $h
+    }} catch {{
+        Write-Host '[!] No se pudo abrir PSSession directa: ' $_.Exception.Message -ForegroundColor Yellow
+    }}
+}}
+Write-Host '[Lili NET] Descargando e iniciando MSOI con permisos de Administrador...' -ForegroundColor Green
+try {{
+    $scriptContent = (Invoke-RestMethod $u)
+    $cleanScript = $scriptContent -replace '\$script:isAdmin\s*=.*', '$script:isAdmin = $true'
+    Invoke-Expression $cleanScript
+}} catch {{
+    Write-Host '[!] Error al ejecutar MSOI: ' $_.Exception.Message -ForegroundColor Red
+}}
+"#,
+            host = ps_escape(&host),
+            script_url = script_url
         );
-        let _ = Command::new("cmd.exe")
-            .args(["/c", "start", "powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+
+        let utf16: Vec<u16> = inner_script.encode_utf16().collect();
+        let mut bytes = Vec::with_capacity(utf16.len() * 2);
+        for u in utf16 {
+            bytes.push((u & 0xFF) as u8);
+            bytes.push((u >> 8) as u8);
+        }
+        let encoded = to_base64(&bytes);
+
+        let runas_cmd = format!(
+            "Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', '{}'",
+            encoded
+        );
+
+        let _ = Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &runas_cmd])
             .spawn();
-        self.notify(&format!("Consola MSOI iniciada para {}", host), ACCENT);
-        self.add_log("MSOI Office", &format!("Lanzada sesión remota PowerShell MSOI para {}", host), ACCENT);
+
+        self.notify(&format!("Iniciando consola MSOI como Administrador para {}", host), ACCENT);
+        self.add_log("MSOI Office", &format!("Lanzada sesión elevada RunAs PowerShell MSOI para {}", host), ACCENT);
     }
 
     fn start_msoi_remote_install(&mut self) {
