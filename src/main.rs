@@ -1464,7 +1464,8 @@ impl LanternApp {
             self.updater_install_receiver = None;
             match res {
                 Ok(_) => {
-                    self.notify("Actualización descargada. Reiniciando...", SUCCESS);
+                    self.notify("Actualización descargada. Reemplazando versión anterior y reiniciando...", SUCCESS);
+                    self.add_log("Actualizador", "Reemplazando ejecutable anterior con la nueva versión y reiniciando...", SUCCESS);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 Err(e) => {
@@ -9458,12 +9459,17 @@ impl LanternApp {
         if do_download {
             if let Some(rel) = &self.updater_available_release {
                 let dl_url = rel.download_url.clone();
+                let current_exe = std::env::current_exe()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let pid = std::process::id();
                 self.updater_downloading = true;
                 self.updater_status_msg = Some(("Descargando actualización desde GitHub...".to_string(), ACCENT));
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.updater_install_receiver = Some(rx);
                 thread::spawn(move || {
-                    let res = apply_github_update_sync(&dl_url);
+                    let res = apply_github_update_sync(&dl_url, &current_exe, pid);
                     let _ = tx.send(res);
                 });
             }
@@ -13086,55 +13092,107 @@ try {{
     }
 }
 
-fn apply_github_update_sync(download_url: &str) -> Result<(), String> {
+fn apply_github_update_sync(download_url: &str, current_exe_path: &str, current_pid: u32) -> Result<(), String> {
     if download_url.trim().is_empty() {
         return Err("No se encontró el archivo ejecutable en la versión de GitHub.".to_string());
+    }
+    if current_exe_path.trim().is_empty() {
+        return Err("No se pudo identificar la ruta del ejecutable actual para actualizar.".to_string());
     }
 
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
 $url = '{}'
-$tempExe = "$env:TEMP\lantern_scan_update.exe"
-$updaterBat = "$env:TEMP\lantern_updater.bat"
-$currentExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+$targetExe = '{}'
+$targetPid = {}
+$tempExe = "$env:TEMP\ili_update_new.exe"
+$updaterBat = "$env:TEMP\ili_portable_updater.bat"
 
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$wc = New-Object System.Net.WebClient
-$wc.Headers.Add("User-Agent", "lantern-updater")
+if (Test-Path -LiteralPath $tempExe) {{
+    Remove-Item -LiteralPath $tempExe -Force -ErrorAction SilentlyContinue
+}}
 
-$ghPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe"
-if (Test-Path $ghPath) {{
-    $tok = (& $ghPath auth token 2>$null)
-    if ($tok -and $tok.Trim() -ne '') {{
-        $wc.Headers.Add("Authorization", "Bearer $($tok.Trim())")
+$downloadOk = $false
+# 1. Intentar descarga rápida con curl.exe (sigue redirecciones de GitHub automáticamente)
+if (Get-Command curl.exe -ErrorAction SilentlyContinue) {{
+    & curl.exe -fSL --retry 2 "$url" -o "$tempExe" 2>$null
+    if ((Test-Path -LiteralPath $tempExe) -and ((Get-Item -LiteralPath $tempExe).Length -gt 500000)) {{
+        $downloadOk = $true
     }}
 }}
 
-$wc.DownloadFile($url, $tempExe)
+# 2. Si curl no descargó, utilizar WebClient con soporte TLS 1.2
+if (-not $downloadOk) {{
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "ili-updater")
 
-if (-not (Test-Path -LiteralPath $tempExe)) {{
-    throw "No se pudo descargar el archivo de actualización"
+    $ghPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe"
+    if (Test-Path $ghPath) {{
+        $tok = (& $ghPath auth token 2>$null)
+        if ($tok -and $tok.Trim() -ne '') {{
+            $wc.Headers.Add("Authorization", "Bearer $($tok.Trim())")
+        }}
+    }}
+
+    $wc.DownloadFile($url, $tempExe)
+    if ((Test-Path -LiteralPath $tempExe) -and ((Get-Item -LiteralPath $tempExe).Length -gt 500000)) {{
+        $downloadOk = $true
+    }}
 }}
 
+if (-not $downloadOk) {{
+    throw "No se pudo descargar la nueva versión completa desde GitHub."
+}}
+
+# 3. Crear script batch para reemplazar limpiamente el ejecutable portable
 $batContent = @"
 @echo off
-timeout /t 1 /nobreak > nul
-:retry
-copy /y "$tempExe" "$currentExe" > nul
-if errorlevel 1 (
-    timeout /t 1 /nobreak > nul
-    goto retry
+set "PID=$targetPid"
+set "OLD_EXE=$targetExe"
+set "NEW_EXE=$tempExe"
+
+:: 1. Esperar a que el proceso anterior finalice
+for /l %%i in (1,1,20) do (
+    tasklist /fi "PID eq %PID%" 2>nul | findstr /i "%PID%" > nul
+    if errorlevel 1 goto proc_exited
+    ping 127.0.0.1 -n 2 > nul
 )
-start "" "$currentExe"
-del "$tempExe" > nul 2>&1
+:: Si tardó en cerrar, forzar el término del proceso previo
+taskkill /f /pid %PID% > nul 2>&1
+ping 127.0.0.1 -n 2 > nul
+
+:proc_exited
+:: 2. Eliminar la versión anterior (.exe portable previo)
+for /l %%i in (1,1,10) do (
+    del /f /q "%OLD_EXE%" > nul 2>&1
+    if not exist "%OLD_EXE%" goto del_ok
+    ping 127.0.0.1 -n 2 > nul
+)
+
+:del_ok
+:: 3. Colocar la nueva versión en la misma ubicación exacta
+move /y "%NEW_EXE%" "%OLD_EXE%" > nul 2>&1
+if errorlevel 1 (
+    copy /y "%NEW_EXE%" "%OLD_EXE%" > nul 2>&1
+    del /f /q "%NEW_EXE%" > nul 2>&1
+)
+
+:: 4. Lanzar la nueva versión actualizada
+ping 127.0.0.1 -n 2 > nul
+start "" "%OLD_EXE%"
+
+:: 5. Autodestrucción del script actualizador
 del "%~f0" > nul 2>&1
 "@
 
-[System.IO.File]::WriteAllText($updaterBat, $batContent)
+[System.IO.File]::WriteAllText($updaterBat, $batContent, [System.Text.Encoding]::ASCII)
 Start-Process -FilePath $updaterBat -WindowStyle Hidden
 "#,
-        ps_escape(download_url)
+        ps_escape(download_url),
+        ps_escape(current_exe_path),
+        current_pid
     );
 
     run_powershell_script(&script)?;
