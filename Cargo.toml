@@ -1,6 +1,6 @@
 [package]
 name = "lantern_scan"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "ili enterprise NET — Consola de Inteligencia de Red y Asistencia Remota"
 license = "MIT"

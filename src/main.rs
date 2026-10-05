@@ -49,6 +49,8 @@ mod license {
         pub key: String,
         pub edition: String,
         pub licensee: String,
+        pub is_trial: bool,
+        pub days_left: i64,
     }
 
     pub fn compute_checksum(payload: &str) -> String {
@@ -116,14 +118,19 @@ mod license {
             key: formatted,
             edition,
             licensee: "Empresa / Administrador de Red".into(),
+            is_trial: false,
+            days_left: 99999,
         })
     }
 
+    #[allow(dead_code)]
     pub fn generate_key(prefix: &str, p1: &str, p2: &str) -> String {
         let payload = format!("{}{}{}", prefix, p1, p2);
         let chk = compute_checksum(&payload);
         format!("ILI-{}-{}-{}-{}", prefix, p1, p2, chk)
     }
+
+    const TRIAL_TOTAL_DAYS: i64 = 10;
 
     fn license_file_path() -> Option<PathBuf> {
         if let Ok(appdata) = std::env::var("APPDATA") {
@@ -135,13 +142,99 @@ mod license {
         }
     }
 
-    pub fn load_saved_license() -> Option<LicenseInfo> {
-        let path = license_file_path()?;
-        if let Ok(content) = fs::read_to_string(path) {
-            let key = content.trim();
-            if let Ok(info) = validate_key(key) {
-                return Some(info);
+    fn trial_file_path() -> Option<PathBuf> {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let dir = PathBuf::from(appdata).join("lili_enterprise_net");
+            let _ = fs::create_dir_all(&dir);
+            Some(dir.join("trial.dat"))
+        } else {
+            Some(PathBuf::from(".lili_trial.dat"))
+        }
+    }
+
+    pub fn get_trial_status() -> Option<Result<LicenseInfo, ()>> {
+        let path = trial_file_path()?;
+        let content = fs::read_to_string(path).ok()?;
+        let parts: Vec<&str> = content.trim().split(':').collect();
+        if parts.len() < 2 {
+            return Some(Err(()));
+        }
+        let start_sec: u64 = parts[0].parse().ok()?;
+        let stored_chk = parts[1];
+        let expected_chk = compute_checksum(&format!("TRIAL{}", start_sec));
+        if stored_chk != expected_chk {
+            return Some(Err(()));
+        }
+
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if now_sec < start_sec {
+            return Some(Err(()));
+        }
+
+        let elapsed_sec = now_sec.saturating_sub(start_sec);
+        let elapsed_days = (elapsed_sec / 86400) as i64;
+        let days_left = TRIAL_TOTAL_DAYS - elapsed_days;
+
+        if days_left > 0 {
+            Some(Ok(LicenseInfo {
+                key: "EVALUACIÓN TEMPORAL (10 DÍAS)".to_string(),
+                edition: format!("Prueba Gratuita (Quedan {} días)", days_left),
+                licensee: "Evaluación Corporativa".to_string(),
+                is_trial: true,
+                days_left,
+            }))
+        } else {
+            Some(Err(()))
+        }
+    }
+
+    pub fn start_trial() -> LicenseInfo {
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if let Some(path) = trial_file_path() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let parts: Vec<&str> = content.trim().split(':').collect();
+                if let Some(first) = parts.first() {
+                    if let Ok(prev_start) = first.parse::<u64>() {
+                        if prev_start <= now_sec {
+                            if let Some(Ok(info)) = get_trial_status() {
+                                return info;
+                            }
+                        }
+                    }
+                }
             }
+            let chk = compute_checksum(&format!("TRIAL{}", now_sec));
+            let _ = fs::write(&path, format!("{}:{}", now_sec, chk));
+        }
+
+        LicenseInfo {
+            key: "EVALUACIÓN TEMPORAL (10 DÍAS)".to_string(),
+            edition: format!("Prueba Gratuita (Quedan {} días)", TRIAL_TOTAL_DAYS),
+            licensee: "Evaluación Corporativa".to_string(),
+            is_trial: true,
+            days_left: TRIAL_TOTAL_DAYS,
+        }
+    }
+
+    pub fn load_saved_license() -> Option<LicenseInfo> {
+        if let Some(path) = license_file_path() {
+            if let Ok(content) = fs::read_to_string(path) {
+                let key = content.trim();
+                if let Ok(info) = validate_key(key) {
+                    return Some(info);
+                }
+            }
+        }
+        if let Some(Ok(trial_info)) = get_trial_status() {
+            return Some(trial_info);
         }
         None
     }
@@ -861,9 +954,13 @@ impl Default for LanternApp {
         };
 
         if let Some(lic) = &saved_license {
-            app.add_log("Licencia", &format!("Licencia Corporativa Activa: {} ({})", lic.key, lic.edition), SUCCESS);
+            if lic.is_trial {
+                app.add_log("Licencia", &format!("Período de Evaluación Activo: Quedan {} días de prueba", lic.days_left), WARNING);
+            } else {
+                app.add_log("Licencia", &format!("Licencia Corporativa Activa: {} ({})", lic.key, lic.edition), SUCCESS);
+            }
         } else {
-            app.add_log("Licencia", "Esperando activación por código serial para desbloquear funciones de red", WARNING);
+            app.add_log("Licencia", "Esperando activación por código serial o prueba gratuita de 10 días", WARNING);
         }
         app.add_log("Sistema", &format!("Lili enterprise NET inicializado. Red objetivo: {} (Local: {})", target_subnet, detected), ACCENT);
         app.fetch_ad_users();
@@ -1714,18 +1811,28 @@ impl LanternApp {
                         ui.label(RichText::new("Lili enterprise NET v2.0").size(9.5).strong().color(ACCENT));
                         ui.add_space(4.0);
                         if let Some(lic) = &self.license {
-                            ui.horizontal(|ui| {
-                                let dot = ui.allocate_exact_size(Vec2::splat(6.0), egui::Sense::hover()).0;
-                                ui.painter().circle_filled(dot.center(), 2.8, SUCCESS);
-                                ui.add_space(3.0);
-                                ui.label(RichText::new("Licencia Corporativa").size(9.5).strong().color(SUCCESS));
-                            });
-                            let masked = if lic.key.len() >= 13 {
-                                format!("{}••••", &lic.key[..lic.key.len().saturating_sub(4)])
+                            if lic.is_trial {
+                                ui.horizontal(|ui| {
+                                    let dot = ui.allocate_exact_size(Vec2::splat(6.0), egui::Sense::hover()).0;
+                                    ui.painter().circle_filled(dot.center(), 2.8, WARNING);
+                                    ui.add_space(3.0);
+                                    ui.label(RichText::new(format!("⏳ Prueba: {} días", lic.days_left)).size(9.5).strong().color(WARNING));
+                                });
+                                ui.label(RichText::new("Requiere serial permanente").size(8.5).color(TEXT_DIM));
                             } else {
-                                lic.key.clone()
-                            };
-                            ui.label(RichText::new(masked).size(8.5).monospace().color(TEXT_DIM));
+                                ui.horizontal(|ui| {
+                                    let dot = ui.allocate_exact_size(Vec2::splat(6.0), egui::Sense::hover()).0;
+                                    ui.painter().circle_filled(dot.center(), 2.8, SUCCESS);
+                                    ui.add_space(3.0);
+                                    ui.label(RichText::new("Licencia Corporativa").size(9.5).strong().color(SUCCESS));
+                                });
+                                let masked = if lic.key.len() >= 13 {
+                                    format!("{}••••", &lic.key[..lic.key.len().saturating_sub(4)])
+                                } else {
+                                    lic.key.clone()
+                                };
+                                ui.label(RichText::new(masked).size(8.5).monospace().color(TEXT_DIM));
+                            }
                         } else {
                             ui.horizontal(|ui| {
                                 let dot = ui.allocate_exact_size(Vec2::splat(6.0), egui::Sense::hover()).0;
@@ -8206,23 +8313,34 @@ impl LanternApp {
                         ui.horizontal(|ui| {
                             let left_info_w = (total_w * 0.65).max(300.0);
                             ui.vertical(|ui| {
-                                detail_kv(ui, "Edición Registrada", &lic.edition, left_info_w);
-                                detail_kv(ui, "Código Serial Corporativo", &lic.key, left_info_w);
+                                detail_kv(ui, "Estado de Licencia", &lic.edition, left_info_w);
+                                detail_kv(ui, "Código Serial", &lic.key, left_info_w);
                                 detail_kv(ui, "Titular de Licencia", &lic.licensee, left_info_w);
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(
-                                    egui::Button::new(RichText::new("Cambiar / Desactivar Licencia").size(11.0).color(DANGER))
-                                        .fill(SURFACE_2)
-                                        .stroke(Stroke::new(1.0_f32, DANGER))
-                                        .rounding(Rounding::same(6.0))
-                                ).on_hover_text("Elimina la activación actual para permitir ingresar otra clave serial").clicked() {
-                                    license::remove_license();
-                                    self.license = None;
-                                    self.activation_key_input.clear();
-                                    self.activation_error = None;
-                                    self.add_log("Licencia", "Licencia desactivada por el usuario", WARNING);
-                                    self.notify("Licencia desactivada. Ingrese una clave para reactivar.", WARNING);
+                                if lic.is_trial {
+                                    if ui.add(
+                                        egui::Button::new(RichText::new("🚀 Activar Serial Corporativo").size(11.0).strong().color(BASE))
+                                            .fill(ACCENT)
+                                            .rounding(Rounding::same(6.0))
+                                    ).on_hover_text("Ingresar clave serial corporativa permanente").clicked() {
+                                        self.license = None;
+                                        self.active_tab = 0;
+                                    }
+                                } else {
+                                    if ui.add(
+                                        egui::Button::new(RichText::new("Cambiar / Desactivar Licencia").size(11.0).color(DANGER))
+                                            .fill(SURFACE_2)
+                                            .stroke(Stroke::new(1.0_f32, DANGER))
+                                            .rounding(Rounding::same(6.0))
+                                    ).on_hover_text("Elimina la activación actual para permitir ingresar otra clave serial").clicked() {
+                                        license::remove_license();
+                                        self.license = None;
+                                        self.activation_key_input.clear();
+                                        self.activation_error = None;
+                                        self.add_log("Licencia", "Licencia desactivada por el usuario", WARNING);
+                                        self.notify("Licencia desactivada. Ingrese una clave para reactivar.", WARNING);
+                                    }
                                 }
                             });
                         });
@@ -9113,60 +9231,85 @@ impl LanternApp {
                                 divider(ui);
                                 ui.add_space(16.0);
 
-                                // Bloque de claves autorizadas / Demo para despliegue rápido
-                                ui.label(RichText::new("CLAVES CORPORATIVAS AUTORIZADAS PARA ESTA INSTALACIÓN:").size(10.0).strong().color(TEXT_DIM));
-                                ui.add_space(8.0);
-
-                                let sample_keys = [
-                                    (
-                                        license::generate_key("ENT1", "9482", "7163"),
-                                        "Edición Corporativa Enterprise",
-                                        ACCENT,
-                                    ),
-                                    (
-                                        license::generate_key("CORP", "8821", "4309"),
-                                        "Licencia Corporativa Ilimitada",
-                                        PURPLE,
-                                    ),
-                                    (
-                                        license::generate_key("PRO1", "5510", "9924"),
-                                        "Edición Profesional Avanzada",
-                                        SUCCESS,
-                                    ),
-                                ];
-
-                                for (k, label, col) in sample_keys {
-                                    egui::Frame::none()
-                                        .fill(SURFACE_2)
-                                        .stroke(Stroke::new(1.0_f32, BORDER))
-                                        .rounding(Rounding::same(8.0))
-                                        .inner_margin(Margin::symmetric(12.0, 8.0))
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.vertical(|ui| {
-                                                    ui.label(RichText::new(&k).size(12.0).monospace().strong().color(col));
-                                                    ui.label(RichText::new(label).size(10.0).color(TEXT_DIM));
-                                                });
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.add(
-                                                        egui::Button::new(RichText::new("Usar Esta Clave ➜").size(11.0).strong().color(BASE))
-                                                            .fill(col)
-                                                            .rounding(Rounding::same(5.0))
-                                                    ).clicked() {
-                                                        self.activation_key_input = k.clone();
-                                                        if let Ok(info) = license::validate_key(&k) {
-                                                            let _ = license::save_license(&info.key);
-                                                            self.add_log("Licencia", &format!("Licencia activada: {} ({})", info.key, info.edition), SUCCESS);
-                                                            self.notify("¡Licencia activada exitosamente!", SUCCESS);
-                                                            self.license = Some(info);
-                                                            self.activation_error = None;
-                                                            self.activation_success = true;
+                                // Bloque de Prueba Gratuita o Aviso de Expiración
+                                match license::get_trial_status() {
+                                    None => {
+                                        ui.label(RichText::new("¿NO DISPONES DE UNA CLAVE SERIAL?").size(10.0).strong().color(TEXT_DIM));
+                                        ui.add_space(8.0);
+                                        egui::Frame::none()
+                                            .fill(SURFACE_2)
+                                            .stroke(Stroke::new(1.0_f32, ACCENT_DIM))
+                                            .rounding(Rounding::same(10.0))
+                                            .inner_margin(Margin::same(16.0))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new("⏳").size(26.0));
+                                                    ui.add_space(8.0);
+                                                    ui.vertical(|ui| {
+                                                        ui.label(RichText::new("Período de Prueba Gratuito (10 Días)").size(13.0).strong().color(TEXT_PRI));
+                                                        ui.label(RichText::new("Acceso completo a todas las funciones corporativas durante 10 días de evaluación.").size(10.5).color(TEXT_SEC));
+                                                    });
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.add(
+                                                            egui::Button::new(RichText::new("🎁 Iniciar Prueba (10 días) ➜").size(11.5).strong().color(BASE))
+                                                                .fill(ACCENT)
+                                                                .rounding(Rounding::same(6.0))
+                                                                .min_size(Vec2::new(190.0, 36.0))
+                                                        ).clicked() {
+                                                            let info = license::start_trial();
+                                                            self.license = Some(info.clone());
+                                                            self.add_log("Licencia", &format!("Iniciado período de evaluación de 10 días: {}", info.edition), SUCCESS);
+                                                            self.notify("¡Prueba de 10 días activada con éxito!", SUCCESS);
                                                         }
-                                                    }
+                                                    });
                                                 });
                                             });
-                                        });
-                                    ui.add_space(6.0);
+                                    }
+                                    Some(Ok(trial_info)) => {
+                                        egui::Frame::none()
+                                            .fill(Color32::from_rgba_unmultiplied(251, 191, 36, 18))
+                                            .stroke(Stroke::new(1.0_f32, WARNING))
+                                            .rounding(Rounding::same(10.0))
+                                            .inner_margin(Margin::same(14.0))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new("⏳").size(24.0));
+                                                    ui.add_space(8.0);
+                                                    ui.vertical(|ui| {
+                                                        ui.label(RichText::new(format!("Período de Prueba Activo: Quedan {} días", trial_info.days_left)).size(13.0).strong().color(WARNING));
+                                                        ui.label(RichText::new("Para activar de forma ilimitada, introduce tu código serial corporativo.").size(10.5).color(TEXT_SEC));
+                                                    });
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.add(
+                                                            egui::Button::new(RichText::new("Continuar con Prueba ➜").size(11.0).color(TEXT_PRI))
+                                                                .fill(SURFACE_2)
+                                                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                                                .rounding(Rounding::same(5.0))
+                                                        ).clicked() {
+                                                            self.license = Some(trial_info);
+                                                        }
+                                                    });
+                                                });
+                                            });
+                                    }
+                                    Some(Err(())) => {
+                                        egui::Frame::none()
+                                            .fill(Color32::from_rgba_unmultiplied(248, 113, 113, 20))
+                                            .stroke(Stroke::new(1.0_f32, DANGER))
+                                            .rounding(Rounding::same(10.0))
+                                            .inner_margin(Margin::same(16.0))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new("⛔").size(28.0));
+                                                    ui.add_space(8.0);
+                                                    ui.vertical(|ui| {
+                                                        ui.label(RichText::new("Período de Prueba de 10 Días Finalizado").size(13.5).strong().color(DANGER));
+                                                        ui.add_space(3.0);
+                                                        ui.label(RichText::new("El tiempo de evaluación gratuita de este equipo ha concluido. Para reactivar el software y continuar administrando la red, introduce un código serial corporativo autorizado.").size(10.5).color(TEXT_PRI));
+                                                    });
+                                                });
+                                            });
+                                    }
                                 }
 
                                 ui.add_space(14.0);
@@ -9864,6 +10007,19 @@ impl eframe::App for LanternApp {
         self.poll_fs();
         self.poll_updater(ctx);
         self.poll_msoi();
+
+        // Validar expiración de período de prueba de 10 días
+        if let Some(lic) = &self.license {
+            if lic.is_trial {
+                if let Some(updated_lic) = license::load_saved_license() {
+                    self.license = Some(updated_lic);
+                } else {
+                    self.license = None;
+                    self.notify("Tu período de prueba de 10 días ha finalizado.", DANGER);
+                    self.add_log("Licencia", "Período de evaluación de 10 días concluido. Ingrese una clave serial.", DANGER);
+                }
+            }
+        }
         // Redibujar frecuentemente al escanear, sincronizar AD / Servidor de Archivos, o cada 2s para la notificación
         if self.scanning || self.ad_loading || self.fs_loading || self.fs_heavy_loading || self.updater_checking || self.updater_downloading || self.msoi_deploying {
             ctx.request_repaint_after(Duration::from_millis(60));
