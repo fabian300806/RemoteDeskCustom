@@ -8864,6 +8864,36 @@ impl LanternApp {
                 divider(ui);
                 ui.add_space(12.0);
 
+                // ── Despliegue de Microsoft Office (MSOI) ───────────────────
+                ui.label(RichText::new("DESPLIEGUE DE SOFTWARE").size(9.5).strong().color(TEXT_DIM));
+                ui.add_space(8.0);
+                let office_card = egui::Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(234, 88, 12, 35))
+                    .stroke(Stroke::new(1.2_f32, Color32::from_rgb(251, 146, 60)))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(Margin::symmetric(14.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.set_width(w - 4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("📦").size(22.0));
+                            ui.add_space(8.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("Instalar Microsoft Office (MSOI)").size(12.5).strong().color(Color32::from_rgb(251, 146, 60)));
+                                ui.label(RichText::new("Office 2024/2021/2019/2016 vía PowerShell").size(10.0).color(TEXT_SEC));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("Abrir ➜").size(11.0).strong().color(Color32::from_rgb(251, 146, 60)));
+                            });
+                        });
+                    });
+                if office_card.response.interact(egui::Sense::click()).clicked() {
+                    self.open_msoi_modal(&device.hostname, &device.ip);
+                }
+
+                ui.add_space(12.0);
+                divider(ui);
+                ui.add_space(12.0);
+
                 // ── Iniciar Sesión con Credenciales (Sin Sesión Previa) ───────
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("INICIAR SESIÓN CON CREDENCIALES").size(9.5).strong().color(TEXT_DIM));
@@ -9306,6 +9336,8 @@ impl LanternApp {
         self.msoi_target_ip = ip.to_string();
         self.msoi_show_modal = true;
         self.msoi_status_msg = None;
+        let display = if hostname.is_empty() || hostname.starts_with("host-") { ip } else { hostname };
+        self.notify(&format!("Abriendo instalador de Office para {}", display), ACCENT);
     }
 
     fn poll_msoi(&mut self) {
@@ -9428,6 +9460,17 @@ impl LanternApp {
             return;
         }
 
+        // Fondo oscuro tipo modal para enfocar la ventana
+        egui::Area::new(egui::Id::new("msoi_modal_dimmer"))
+            .interactable(true)
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.allocate_rect(screen, egui::Sense::click());
+                ui.painter().rect_filled(screen, Rounding::ZERO, Color32::from_black_alpha(160));
+            });
+
         let mut close = false;
         let mut trigger_install = false;
         let mut trigger_cli = false;
@@ -9441,6 +9484,7 @@ impl LanternApp {
         };
 
         egui::Window::new("📦 Despliegue Remoto de Microsoft Office (MSOI)")
+            .id(egui::Id::new("msoi_modal_dialog_box"))
             .collapsible(false)
             .resizable(false)
             .order(egui::Order::Foreground)
