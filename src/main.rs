@@ -638,7 +638,7 @@ struct LanternApp {
 impl Default for LanternApp {
     fn default() -> Self {
         let detected = detect_local_network();
-        let target_subnet = detected.clone();
+        let target_subnet = "10.35.10.0/24".to_string();
         let saved_license = license::load_saved_license();
 
         let mut app = Self {
@@ -12214,7 +12214,7 @@ try {{
 }
 
 fn detect_local_network() -> String {
-    let fb = "10.35.12.0/24".to_string();
+    let fb = "10.35.10.0/24".to_string();
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
         if s.connect("8.8.8.8:80").is_ok() {
             if let Ok(addr) = s.local_addr() {
