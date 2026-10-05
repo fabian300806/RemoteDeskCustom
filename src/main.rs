@@ -9492,6 +9492,35 @@ try {{
         });
     }
 
+    fn start_msoi_remote_uninstall(&mut self) {
+        if self.msoi_deploying {
+            return;
+        }
+        let target = if self.msoi_target_host.starts_with("host-") || self.msoi_target_host.is_empty() {
+            self.msoi_target_ip.clone()
+        } else {
+            self.msoi_target_host.clone()
+        };
+        if target.trim().is_empty() {
+            self.notify("Indique un equipo destino", WARNING);
+            return;
+        }
+
+        self.msoi_deploying = true;
+        self.msoi_status_msg = Some((format!("Desinstalando y limpiando versiones de Office previas en {}...", target), WARNING));
+        self.notify(&format!("Iniciando desinstalación de Office en {}", target), WARNING);
+        self.add_log("MSOI Office", &format!("Desinstalando versiones de Office previas en {}", target), WARNING);
+
+        let (tx, rx) = mpsc::channel();
+        self.msoi_receiver = Some(rx);
+
+        let target_clone = target.clone();
+        thread::spawn(move || {
+            let res = msoi_uninstall_remote_sync(&target_clone);
+            let _ = tx.send(res);
+        });
+    }
+
     fn ui_msoi_modal(&mut self, ctx: &egui::Context) {
         if !self.msoi_show_modal {
             return;
@@ -9510,6 +9539,7 @@ try {{
 
         let mut close = false;
         let mut trigger_install = false;
+        let mut trigger_uninstall = false;
         let mut trigger_cli = false;
         let mut trigger_gui = false;
         let mut trigger_copy = false;
@@ -9712,67 +9742,81 @@ try {{
                 ui.add_space(12.0);
 
                 // Botones de Acción
-                ui.horizontal(|ui| {
-                    let deploy_btn = egui::Button::new(RichText::new("🚀 Despliegue Silencioso Remoto").size(11.5).strong().color(Color32::BLACK))
+                ui.horizontal_wrapped(|ui| {
+                    let deploy_btn = egui::Button::new(RichText::new("🚀 Despliegue Silencioso").size(11.5).strong().color(Color32::BLACK))
                         .fill(Color32::from_rgb(251, 146, 60))
                         .rounding(Rounding::same(6.0))
-                        .min_size(Vec2::new(190.0, 32.0));
+                        .min_size(Vec2::new(160.0, 32.0));
                     if ui.add_enabled(!self.msoi_deploying, deploy_btn).on_hover_text("Descarga ODT y ejecuta instalación desatendida en el equipo mediante PowerShell").clicked() {
                         trigger_install = true;
                     }
 
-                    ui.add_space(6.0);
+                    ui.add_space(5.0);
 
-                    if ui.add(
-                        egui::Button::new(RichText::new("💻 Consola CLI Remota").size(11.0).color(TEXT_PRI))
-                            .fill(SURFACE_2)
-                            .stroke(Stroke::new(1.0_f32, BORDER))
-                            .rounding(Rounding::same(6.0))
-                            .min_size(Vec2::new(140.0, 32.0))
-                    ).on_hover_text("Abre PowerShell conectado al equipo con irm MSOICLI.ps1 | iex").clicked() {
-                        trigger_cli = true;
+                    let uninst_btn = egui::Button::new(RichText::new("🧹 Desinstalar Office Previo").size(11.0).color(DANGER))
+                        .fill(SURFACE_2)
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(248, 113, 113, 90)))
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(170.0, 32.0));
+                    if ui.add_enabled(!self.msoi_deploying, uninst_btn).on_hover_text("Desinstala versiones previas en conflicto de Office en el equipo para permitir una instalación limpia").clicked() {
+                        trigger_uninstall = true;
                     }
 
-                    ui.add_space(6.0);
+                    ui.add_space(5.0);
 
                     if ui.add(
-                        egui::Button::new(RichText::new("🖼 Interfaz GUI").size(11.0).color(TEXT_PRI))
+                        egui::Button::new(RichText::new("💻 Consola CLI").size(11.0).color(TEXT_PRI))
                             .fill(SURFACE_2)
                             .stroke(Stroke::new(1.0_f32, BORDER))
                             .rounding(Rounding::same(6.0))
                             .min_size(Vec2::new(115.0, 32.0))
+                    ).on_hover_text("Abre PowerShell como Administrador conectado al equipo con irm MSOICLI.ps1 | iex").clicked() {
+                        trigger_cli = true;
+                    }
+
+                    ui.add_space(5.0);
+
+                    if ui.add(
+                        egui::Button::new(RichText::new("🖼 GUI").size(11.0).color(TEXT_PRI))
+                            .fill(SURFACE_2)
+                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(75.0, 32.0))
                     ).on_hover_text("Abre PowerShell conectado al equipo con la interfaz gráfica irm MSOIGUI.ps1 | iex").clicked() {
                         trigger_gui = true;
                     }
 
-                    ui.add_space(6.0);
+                    ui.add_space(5.0);
 
                     if ui.add(
-                        egui::Button::new(RichText::new("📋 Copiar irm CLI").size(11.0).color(ACCENT))
+                        egui::Button::new(RichText::new("📋 Copiar irm").size(11.0).color(ACCENT))
                             .fill(SURFACE_2)
                             .stroke(Stroke::new(1.0_f32, ACCENT_DIM))
                             .rounding(Rounding::same(6.0))
-                            .min_size(Vec2::new(115.0, 32.0))
+                            .min_size(Vec2::new(95.0, 32.0))
                     ).on_hover_text("Copiar 'irm https://aldagou.github.io/MSOI/MSOICLI.ps1 | iex' al portapapeles").clicked() {
                         trigger_copy = true;
                     }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(
-                            egui::Button::new(RichText::new("Cerrar").size(11.0).color(TEXT_SEC))
-                                .fill(SURFACE_1)
-                                .stroke(Stroke::new(1.0_f32, BORDER))
-                                .rounding(Rounding::same(6.0))
-                                .min_size(Vec2::new(75.0, 32.0))
-                        ).clicked() {
-                            close = true;
-                        }
-                    });
+                    ui.add_space(8.0);
+
+                    if ui.add(
+                        egui::Button::new(RichText::new("Cerrar").size(11.0).color(TEXT_SEC))
+                            .fill(SURFACE_1)
+                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(65.0, 32.0))
+                    ).clicked() {
+                        close = true;
+                    }
                 });
             });
 
         if trigger_install {
             self.start_msoi_remote_install();
+        }
+        if trigger_uninstall {
+            self.start_msoi_remote_uninstall();
         }
         if trigger_cli {
             self.launch_msoi_remote_console(false);
@@ -13059,6 +13103,62 @@ if ($isLocal) {{
         Err(output.trim().to_string())
     } else {
         Ok(format!("¡Despliegue exitoso en {}! Microsoft Office configurado correctamente.", clean_target))
+    }
+}
+
+fn msoi_uninstall_remote_sync(target: &str) -> Result<String, String> {
+    let clean_target = target.trim();
+    if clean_target.is_empty() {
+        return Err("No se ha especificado un host o dirección IP destino.".into());
+    }
+
+    let script = format!(
+        r#"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$target = '{target}'
+$sb = {{
+    $ErrorActionPreference = 'Stop'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $deployDir = "C:\Windows\Temp\MSOI_Deploy"
+    if (-not (Test-Path $deployDir)) {{
+        New-Item -ItemType Directory -Path $deployDir -Force | Out-Null
+    }}
+
+    $odtUrl = "https://download.microsoft.com/download/2/7/A/27AF1BE6-DD20-4CB4-B154-EBAB8A7D4A7E/officedeploymenttool_18227-20162.exe"
+    $odtExe = "$deployDir\odt.exe"
+    $wc = New-Object System.Net.WebClient
+    $wc.DownloadFile($odtUrl, $odtExe)
+    Start-Process -FilePath $odtExe -ArgumentList "/extract:`"$deployDir`" /quiet /norestart" -Wait -NoNewWindow
+
+    $xml = "<Configuration><Remove All=`"TRUE`" /><Display Level=`"None`" AcceptEULA=`"TRUE`" /></Configuration>"
+    $xmlPath = "$deployDir\remove.xml"
+    [System.IO.File]::WriteAllText($xmlPath, $xml)
+
+    $setupExe = "$deployDir\setup.exe"
+    if (-not (Test-Path $setupExe)) {{
+        throw "No se encontró setup.exe en el directorio temporal"
+    }}
+
+    $p = Start-Process -FilePath $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
+    Remove-Item $deployDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    return "Office desinstalado y limpiado correctamente del equipo."
+}}
+
+$isLocal = ($target -eq '127.0.0.1' -or $target -eq 'localhost' -or $target -eq $env:COMPUTERNAME -or $target -eq $env:COMPUTERNAME.ToLower())
+if ($isLocal) {{
+    & $sb
+}} else {{
+    Invoke-Command -ComputerName $target -ScriptBlock $sb -ErrorAction Stop
+}}
+"#,
+        target = ps_escape(clean_target)
+    );
+
+    let output = run_powershell_script(&script)?;
+    if output.contains("Error") && !output.contains("desinstalado") {
+        Err(output.trim().to_string())
+    } else {
+        Ok(format!("¡Office previo desinstalado exitosamente en {}! Ya puedes proceder a instalar una versión limpia.", clean_target))
     }
 }
 
