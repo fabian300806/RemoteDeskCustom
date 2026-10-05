@@ -633,6 +633,27 @@ struct LanternApp {
     activation_key_input: String,
     activation_error: Option<String>,
     activation_success: bool,
+
+    // Modal de Instalación Remota de Microsoft Office (MSOI)
+    msoi_show_modal: bool,
+    msoi_target_host: String,
+    msoi_target_ip: String,
+    msoi_version_idx: usize,
+    msoi_arch_64: bool,
+    msoi_lang_es: bool,
+    msoi_app_word: bool,
+    msoi_app_excel: bool,
+    msoi_app_powerpoint: bool,
+    msoi_app_outlook: bool,
+    msoi_app_onenote: bool,
+    msoi_app_access: bool,
+    msoi_app_publisher: bool,
+    msoi_include_project: bool,
+    msoi_include_visio: bool,
+    msoi_activate_mas: bool,
+    msoi_deploying: bool,
+    msoi_status_msg: Option<(String, Color32)>,
+    msoi_receiver: Option<Receiver<Result<String, String>>>,
 }
 
 impl Default for LanternApp {
@@ -818,6 +839,25 @@ impl Default for LanternApp {
             activation_key_input: String::new(),
             activation_error: None,
             activation_success: false,
+            msoi_show_modal: false,
+            msoi_target_host: String::new(),
+            msoi_target_ip: String::new(),
+            msoi_version_idx: 0,
+            msoi_arch_64: true,
+            msoi_lang_es: true,
+            msoi_app_word: true,
+            msoi_app_excel: true,
+            msoi_app_powerpoint: true,
+            msoi_app_outlook: true,
+            msoi_app_onenote: true,
+            msoi_app_access: false,
+            msoi_app_publisher: false,
+            msoi_include_project: false,
+            msoi_include_visio: false,
+            msoi_activate_mas: true,
+            msoi_deploying: false,
+            msoi_status_msg: None,
+            msoi_receiver: None,
         };
 
         if let Some(lic) = &saved_license {
@@ -8700,6 +8740,15 @@ impl LanternApp {
                     if action_btn(ui, "📁 D$", SURFACE_2, TEXT_SEC) {
                         open_remote_drive(&device.ip, "D");
                     }
+                    ui.add_space(5.0);
+                    if action_btn_color(
+                        ui,
+                        "📦 Instalar Office (MSOI)",
+                        Color32::from_rgba_unmultiplied(234, 88, 12, 38),
+                        Color32::from_rgb(251, 146, 60),
+                    ) {
+                        self.open_msoi_modal(&device.hostname, &device.ip);
+                    }
                 });
 
                 ui.add_space(12.0);
@@ -9251,6 +9300,413 @@ impl LanternApp {
             self.updater_show_modal = false;
         }
     }
+
+    fn open_msoi_modal(&mut self, hostname: &str, ip: &str) {
+        self.msoi_target_host = hostname.to_string();
+        self.msoi_target_ip = ip.to_string();
+        self.msoi_show_modal = true;
+        self.msoi_status_msg = None;
+    }
+
+    fn poll_msoi(&mut self) {
+        let mut finished_res = None;
+        if let Some(rx) = &self.msoi_receiver {
+            if let Ok(res) = rx.try_recv() {
+                finished_res = Some(res);
+            }
+        }
+        if let Some(res) = finished_res {
+            self.msoi_deploying = false;
+            self.msoi_receiver = None;
+            match res {
+                Ok(msg) => {
+                    self.msoi_status_msg = Some((msg.clone(), SUCCESS));
+                    self.notify(&msg, SUCCESS);
+                    self.add_log("MSOI Office", &msg, SUCCESS);
+                }
+                Err(err) => {
+                    self.msoi_status_msg = Some((format!("Error: {}", err), DANGER));
+                    self.notify(&format!("Error en instalación MSOI: {}", err), DANGER);
+                    self.add_log("MSOI Office", &format!("Fallo en despliegue: {}", err), DANGER);
+                }
+            }
+        }
+    }
+
+    fn launch_msoi_remote_console(&mut self, is_gui: bool) {
+        let host = if self.msoi_target_host.starts_with("host-") || self.msoi_target_host.is_empty() {
+            self.msoi_target_ip.clone()
+        } else {
+            self.msoi_target_host.clone()
+        };
+        let script_url = if is_gui {
+            "https://aldagou.github.io/MSOI/MSOIGUI.ps1"
+        } else {
+            "https://aldagou.github.io/MSOI/MSOICLI.ps1"
+        };
+        let ps_cmd = format!(
+            "$h='{}'; Write-Host \"[Lili NET] Conectando con $h para instalador Office MSOI...\" -ForegroundColor Cyan; if (Test-Connection -ComputerName $h -Count 1 -Quiet) {{ Write-Host \"Conexión establecida con $h. Iniciando MSOI interactivo...\" -ForegroundColor Green; Enter-PSSession -ComputerName $h; irm {} | iex }} else {{ Write-Host \"No se pudo conectar a $h. Abriendo instalador MSOI localmente...\" -ForegroundColor Yellow; irm {} | iex }}",
+            host, script_url, script_url
+        );
+        let _ = Command::new("cmd.exe")
+            .args(["/c", "start", "powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .spawn();
+        self.notify(&format!("Consola MSOI iniciada para {}", host), ACCENT);
+        self.add_log("MSOI Office", &format!("Lanzada sesión remota PowerShell MSOI para {}", host), ACCENT);
+    }
+
+    fn start_msoi_remote_install(&mut self) {
+        if self.msoi_deploying {
+            return;
+        }
+        let target = if self.msoi_target_host.starts_with("host-") || self.msoi_target_host.is_empty() {
+            self.msoi_target_ip.clone()
+        } else {
+            self.msoi_target_host.clone()
+        };
+        if target.trim().is_empty() {
+            self.notify("Indique un equipo destino para la instalación", WARNING);
+            return;
+        }
+
+        let versions = [
+            ("PerpetualVL2024", "ProPlus2024Volume", "VisioPro2024Volume", "ProjectPro2024Volume"),
+            ("PerpetualVL2021", "ProPlus2021Volume", "VisioPro2021Volume", "ProjectPro2021Volume"),
+            ("PerpetualVL2019", "ProPlus2019Volume", "VisioPro2019Volume", "ProjectPro2019Volume"),
+            ("PerpetualVL2016", "ProPlus2016Volume", "VisioPro2016Volume", "ProjectPro2016Volume"),
+            ("PerpetualVL2013", "ProPlus2013Volume", "VisioPro2013Volume", "ProjectPro2013Volume"),
+        ];
+        let (channel, prod_id, visio_id, proj_id) = versions[self.msoi_version_idx.min(versions.len() - 1)];
+
+        let arch = if self.msoi_arch_64 { "64" } else { "32" };
+        let lang = if self.msoi_lang_es { "es-es" } else { "en-us" };
+
+        let mut excludes: Vec<&'static str> = vec!["Bing", "Groove", "Lync", "OneDrive", "Teams"];
+        if !self.msoi_app_word { excludes.push("Word"); }
+        if !self.msoi_app_excel { excludes.push("Excel"); }
+        if !self.msoi_app_powerpoint { excludes.push("PowerPoint"); }
+        if !self.msoi_app_outlook { excludes.push("Outlook"); }
+        if !self.msoi_app_onenote { excludes.push("OneNote"); }
+        if !self.msoi_app_access { excludes.push("Access"); }
+        if !self.msoi_app_publisher { excludes.push("Publisher"); }
+
+        let inc_proj = self.msoi_include_project;
+        let inc_visio = self.msoi_include_visio;
+        let activate = self.msoi_activate_mas;
+
+        self.msoi_deploying = true;
+        self.msoi_status_msg = Some((format!("Desplegando Office en {}... Descargando ODT y configurando...", target), ACCENT));
+        self.notify(&format!("Iniciado despliegue de Office en {}", target), ACCENT);
+        self.add_log("MSOI Office", &format!("Iniciando instalación silenciosa de Office en {}", target), ACCENT);
+
+        let (tx, rx) = mpsc::channel();
+        self.msoi_receiver = Some(rx);
+
+        let target_clone = target.clone();
+        let excludes_owned: Vec<String> = excludes.iter().map(|s| s.to_string()).collect();
+
+        thread::spawn(move || {
+            let res = msoi_install_remote_sync(
+                &target_clone,
+                channel,
+                prod_id,
+                visio_id,
+                proj_id,
+                lang,
+                arch,
+                &excludes_owned,
+                inc_proj,
+                inc_visio,
+                activate,
+            );
+            let _ = tx.send(res);
+        });
+    }
+
+    fn ui_msoi_modal(&mut self, ctx: &egui::Context) {
+        if !self.msoi_show_modal {
+            return;
+        }
+
+        let mut close = false;
+        let mut trigger_install = false;
+        let mut trigger_cli = false;
+        let mut trigger_gui = false;
+        let mut trigger_copy = false;
+
+        let target_display = if self.msoi_target_host.is_empty() || self.msoi_target_host.starts_with("host-") {
+            self.msoi_target_ip.clone()
+        } else {
+            format!("{} ({})", self.msoi_target_host, self.msoi_target_ip)
+        };
+
+        egui::Window::new("📦 Despliegue Remoto de Microsoft Office (MSOI)")
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .default_size(Vec2::new(650.0, 580.0))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(
+                egui::Frame::none()
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, BORDER_LT))
+                    .rounding(Rounding::same(12.0))
+                    .inner_margin(Margin::same(20.0))
+            )
+            .show(ctx, |ui| {
+                // Header
+                ui.horizontal(|ui| {
+                    let icon_box = egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(234, 88, 12, 35))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(234, 88, 12)))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::same(10.0));
+                    icon_box.show(ui, |ui| {
+                        ui.label(RichText::new("📦").size(24.0));
+                    });
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Microsoft Office Installer (MSOI)").size(15.0).strong().color(TEXT_PRI));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Equipo destino:").size(11.0).color(TEXT_DIM));
+                            ui.label(RichText::new(&target_display).size(11.5).strong().color(ACCENT));
+                        });
+                    });
+                });
+
+                ui.add_space(14.0);
+                divider(ui);
+                ui.add_space(12.0);
+
+                // Versión de Office
+                ui.label(RichText::new("1. VERSIÓN DE MICROSOFT OFFICE").size(10.0).strong().color(TEXT_DIM));
+                ui.add_space(6.0);
+                let versions = [
+                    "2024 LTSC",
+                    "2021 LTSC",
+                    "2019 Pro",
+                    "2016 Pro",
+                    "2013 Pro",
+                ];
+                ui.horizontal(|ui| {
+                    for (idx, ver_label) in versions.iter().enumerate() {
+                        let selected = self.msoi_version_idx == idx;
+                        let fill = if selected { Color32::from_rgba_unmultiplied(234, 88, 12, 45) } else { SURFACE_2 };
+                        let border_color = if selected { Color32::from_rgb(251, 146, 60) } else { BORDER };
+                        let text_color = if selected { Color32::from_rgb(251, 146, 60) } else { TEXT_SEC };
+                        if ui.add(
+                            egui::Button::new(RichText::new(*ver_label).size(11.0).strong().color(text_color))
+                                .fill(fill)
+                                .stroke(Stroke::new(1.0_f32, border_color))
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(102.0, 30.0))
+                        ).clicked() {
+                            self.msoi_version_idx = idx;
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+
+                // Arquitectura e Idioma
+                ui.columns(2, |cols| {
+                    cols[0].vertical(|ui| {
+                        ui.label(RichText::new("2. ARQUITECTURA").size(10.0).strong().color(TEXT_DIM));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let arch64_sel = self.msoi_arch_64;
+                            if ui.add(
+                                egui::Button::new(RichText::new("64-bit (x64)").size(11.0).strong().color(if arch64_sel { ACCENT } else { TEXT_SEC }))
+                                    .fill(if arch64_sel { Color32::from_rgba_unmultiplied(56, 189, 248, 25) } else { SURFACE_2 })
+                                    .stroke(Stroke::new(1.0_f32, if arch64_sel { ACCENT } else { BORDER }))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(115.0, 26.0))
+                            ).clicked() {
+                                self.msoi_arch_64 = true;
+                            }
+                            if ui.add(
+                                egui::Button::new(RichText::new("32-bit (x86)").size(11.0).strong().color(if !arch64_sel { ACCENT } else { TEXT_SEC }))
+                                    .fill(if !arch64_sel { Color32::from_rgba_unmultiplied(56, 189, 248, 25) } else { SURFACE_2 })
+                                    .stroke(Stroke::new(1.0_f32, if !arch64_sel { ACCENT } else { BORDER }))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(115.0, 26.0))
+                            ).clicked() {
+                                self.msoi_arch_64 = false;
+                            }
+                        });
+                    });
+
+                    cols[1].vertical(|ui| {
+                        ui.label(RichText::new("3. IDIOMA").size(10.0).strong().color(TEXT_DIM));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let lang_es_sel = self.msoi_lang_es;
+                            if ui.add(
+                                egui::Button::new(RichText::new("🇪🇸 Español").size(11.0).strong().color(if lang_es_sel { SUCCESS } else { TEXT_SEC }))
+                                    .fill(if lang_es_sel { Color32::from_rgba_unmultiplied(52, 211, 153, 25) } else { SURFACE_2 })
+                                    .stroke(Stroke::new(1.0_f32, if lang_es_sel { SUCCESS } else { BORDER }))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(115.0, 26.0))
+                            ).clicked() {
+                                self.msoi_lang_es = true;
+                            }
+                            if ui.add(
+                                egui::Button::new(RichText::new("🇺🇸 English").size(11.0).strong().color(if !lang_es_sel { SUCCESS } else { TEXT_SEC }))
+                                    .fill(if !lang_es_sel { Color32::from_rgba_unmultiplied(52, 211, 153, 25) } else { SURFACE_2 })
+                                    .stroke(Stroke::new(1.0_f32, if !lang_es_sel { SUCCESS } else { BORDER }))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(115.0, 26.0))
+                            ).clicked() {
+                                self.msoi_lang_es = false;
+                            }
+                        });
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                // Aplicaciones a instalar
+                ui.label(RichText::new("4. APLICACIONES INDIVIDUALES").size(10.0).strong().color(TEXT_DIM));
+                ui.add_space(6.0);
+                egui::Frame::none()
+                    .fill(SURFACE_1)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(Margin::same(12.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.msoi_app_word, RichText::new("Word").size(11.5).color(TEXT_PRI));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_app_excel, RichText::new("Excel").size(11.5).color(TEXT_PRI));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_app_powerpoint, RichText::new("PowerPoint").size(11.5).color(TEXT_PRI));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_app_outlook, RichText::new("Outlook").size(11.5).color(TEXT_PRI));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_app_onenote, RichText::new("OneNote").size(11.5).color(TEXT_PRI));
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.msoi_app_access, RichText::new("Access").size(11.5).color(TEXT_PRI));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_app_publisher, RichText::new("Publisher").size(11.5).color(TEXT_PRI));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_include_project, RichText::new("+ Project Pro").size(11.5).color(PURPLE));
+                            ui.add_space(16.0);
+                            ui.checkbox(&mut self.msoi_include_visio, RichText::new("+ Visio Pro").size(11.5).color(TEAL));
+                        });
+                    });
+
+                ui.add_space(10.0);
+
+                // Activación y Optimizaciones
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.msoi_activate_mas, RichText::new("🔑 Activar automáticamente con licencia permanente MAS Ohook").size(11.0).color(WARNING));
+                });
+                ui.add_space(4.0);
+                egui::Frame::none()
+                    .fill(SURFACE_2)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::symmetric(10.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("🛡 Exclusiones automáticas MSOI: Bing, Groove, Lync, OneDrive y Teams se excluyen de la instalación para mantener el equipo ágil y sin bloatware.").size(9.5).color(TEXT_DIM));
+                    });
+
+                // Estado / Feedback
+                if self.msoi_deploying {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Desplegando e instalando Office remotamente... Espere por favor.").size(11.0).color(ACCENT));
+                    });
+                } else if let Some((msg, col)) = &self.msoi_status_msg {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(msg).size(10.5).color(*col));
+                }
+
+                ui.add_space(14.0);
+                divider(ui);
+                ui.add_space(12.0);
+
+                // Botones de Acción
+                ui.horizontal(|ui| {
+                    let deploy_btn = egui::Button::new(RichText::new("🚀 Despliegue Silencioso Remoto").size(11.5).strong().color(Color32::BLACK))
+                        .fill(Color32::from_rgb(251, 146, 60))
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(190.0, 32.0));
+                    if ui.add_enabled(!self.msoi_deploying, deploy_btn).on_hover_text("Descarga ODT y ejecuta instalación desatendida en el equipo mediante PowerShell").clicked() {
+                        trigger_install = true;
+                    }
+
+                    ui.add_space(6.0);
+
+                    if ui.add(
+                        egui::Button::new(RichText::new("💻 Consola CLI Remota").size(11.0).color(TEXT_PRI))
+                            .fill(SURFACE_2)
+                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(140.0, 32.0))
+                    ).on_hover_text("Abre PowerShell conectado al equipo con irm MSOICLI.ps1 | iex").clicked() {
+                        trigger_cli = true;
+                    }
+
+                    ui.add_space(6.0);
+
+                    if ui.add(
+                        egui::Button::new(RichText::new("🖼 Interfaz GUI").size(11.0).color(TEXT_PRI))
+                            .fill(SURFACE_2)
+                            .stroke(Stroke::new(1.0_f32, BORDER))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(115.0, 32.0))
+                    ).on_hover_text("Abre PowerShell conectado al equipo con la interfaz gráfica irm MSOIGUI.ps1 | iex").clicked() {
+                        trigger_gui = true;
+                    }
+
+                    ui.add_space(6.0);
+
+                    if ui.add(
+                        egui::Button::new(RichText::new("📋 Copiar irm CLI").size(11.0).color(ACCENT))
+                            .fill(SURFACE_2)
+                            .stroke(Stroke::new(1.0_f32, ACCENT_DIM))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(115.0, 32.0))
+                    ).on_hover_text("Copiar 'irm https://aldagou.github.io/MSOI/MSOICLI.ps1 | iex' al portapapeles").clicked() {
+                        trigger_copy = true;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("Cerrar").size(11.0).color(TEXT_SEC))
+                                .fill(SURFACE_1)
+                                .stroke(Stroke::new(1.0_f32, BORDER))
+                                .rounding(Rounding::same(6.0))
+                                .min_size(Vec2::new(75.0, 32.0))
+                        ).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+
+        if trigger_install {
+            self.start_msoi_remote_install();
+        }
+        if trigger_cli {
+            self.launch_msoi_remote_console(false);
+        }
+        if trigger_gui {
+            self.launch_msoi_remote_console(true);
+        }
+        if trigger_copy {
+            ctx.output_mut(|o| o.copied_text = "irm https://aldagou.github.io/MSOI/MSOICLI.ps1 | iex".to_string());
+            self.notify("Comando MSOI copiado al portapapeles", ACCENT);
+        }
+        if close {
+            self.msoi_show_modal = false;
+        }
+    }
 }
 
 // ── eframe::App Implementation ────────────────────────────────────────────────
@@ -9270,8 +9726,9 @@ impl eframe::App for LanternApp {
         self.poll_ad();
         self.poll_fs();
         self.poll_updater(ctx);
+        self.poll_msoi();
         // Redibujar frecuentemente al escanear, sincronizar AD / Servidor de Archivos, o cada 2s para la notificación
-        if self.scanning || self.ad_loading || self.fs_loading || self.fs_heavy_loading || self.updater_checking || self.updater_downloading {
+        if self.scanning || self.ad_loading || self.fs_loading || self.fs_heavy_loading || self.updater_checking || self.updater_downloading || self.msoi_deploying {
             ctx.request_repaint_after(Duration::from_millis(60));
         } else if self.notification.is_some() {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -9393,6 +9850,8 @@ impl eframe::App for LanternApp {
         self.ui_fs_modals(ctx);
         // Renderizar Modal de Auto-Actualización GitHub
         self.ui_updater_modal(ctx);
+        // Renderizar Modal de Instalación Remota de Microsoft Office (MSOI)
+        self.ui_msoi_modal(ctx);
     }
 }
 
@@ -12387,6 +12846,139 @@ Start-Process -FilePath $updaterBat -WindowStyle Hidden
 
     run_powershell_script(&script)?;
     Ok(())
+}
+
+fn msoi_install_remote_sync(
+    target: &str,
+    channel: &str,
+    prod_id: &str,
+    visio_id: &str,
+    proj_id: &str,
+    lang: &str,
+    arch: &str,
+    exclude_list: &[String],
+    inc_proj: bool,
+    inc_visio: bool,
+    activate: bool,
+) -> Result<String, String> {
+    let clean_target = target.trim();
+    if clean_target.is_empty() {
+        return Err("No se ha especificado un host o dirección IP destino.".into());
+    }
+
+    let excludes_script = exclude_list
+        .iter()
+        .map(|e| format!("'{}'", ps_escape(e)))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let inc_proj_str = if inc_proj { "$true" } else { "$false" };
+    let inc_visio_str = if inc_visio { "$true" } else { "$false" };
+    let activate_str = if activate { "$true" } else { "$false" };
+
+    let script = format!(
+        r#"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$target = '{target}'
+$channel = '{channel}'
+$prodId = '{prod_id}'
+$visioId = '{visio_id}'
+$projId = '{proj_id}'
+$lang = '{lang}'
+$arch = '{arch}'
+$excludeApps = @({excludes})
+$incProj = {inc_proj}
+$incVisio = {inc_visio}
+$activate = {activate}
+
+$sb = {{
+    param($tChannel, $tProdId, $tVisioId, $tProjId, $tLang, $tArch, $tExcludes, $tIncProj, $tIncVisio, $tActivate)
+    $ErrorActionPreference = 'Stop'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $deployDir = "C:\Windows\Temp\MSOI_Deploy"
+    if (Test-Path $deployDir) {{ Remove-Item $deployDir -Recurse -Force -ErrorAction SilentlyContinue }}
+    New-Item -ItemType Directory -Path $deployDir -Force | Out-Null
+
+    $odtUrl = "https://download.microsoft.com/download/2/7/A/27AF1BE6-DD20-4CB4-B154-EBAB8A7D4A7E/officedeploymenttool_18227-20162.exe"
+    $odtExe = "$deployDir\odt.exe"
+    $wc = New-Object System.Net.WebClient
+    $wc.DownloadFile($odtUrl, $odtExe)
+
+    if (-not (Test-Path $odtExe)) {{
+        throw "No se pudo descargar la herramienta de despliegue de Office (ODT)"
+    }}
+
+    Start-Process -FilePath $odtExe -ArgumentList "/extract:`"$deployDir`" /quiet /norestart" -Wait -NoNewWindow
+
+    $xml = "<Configuration>`n"
+    $xml += "  <Add OfficeClientEdition=`"$tArch`" Channel=`"$tChannel`">`n"
+    $xml += "    <Product ID=`"$tProdId`">`n"
+    $xml += "      <Language ID=`"$tLang`" />`n"
+    foreach ($ex in $tExcludes) {{
+        $xml += "      <ExcludeApp ID=`"$ex`" />`n"
+    }}
+    $xml += "    </Product>`n"
+    if ($tIncProj -and $tProjId -and $tProjId.Trim() -ne '') {{
+        $xml += "    <Product ID=`"$tProjId`">`n      <Language ID=`"$tLang`" />`n    </Product>`n"
+    }}
+    if ($tIncVisio -and $tVisioId -and $tVisioId.Trim() -ne '') {{
+        $xml += "    <Product ID=`"$tVisioId`">`n      <Language ID=`"$tLang`" />`n    </Product>`n"
+    }}
+    $xml += "  </Add>`n"
+    $xml += "  <RemoveMSI />`n"
+    $xml += "  <Display Level=`"None`" AcceptEULA=`"TRUE`" />`n"
+    $xml += "  <Property Name=`"AUTOACTIVATE`" Value=`"1`" />`n"
+    $xml += "</Configuration>"
+
+    $xmlPath = "$deployDir\configuration.xml"
+    [System.IO.File]::WriteAllText($xmlPath, $xml)
+
+    $setupExe = "$deployDir\setup.exe"
+    if (-not (Test-Path $setupExe)) {{
+        throw "No se encontró setup.exe en el directorio extraído"
+    }}
+
+    $p = Start-Process -FilePath $setupExe -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) {{
+        throw "El instalador setup.exe devolvió código de error $($p.ExitCode)"
+    }}
+
+    Remove-Item $deployDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    if ($tActivate) {{
+        try {{
+            irm https://get.activated.win | iex /Ohook /S
+        }} catch {{}}
+    }}
+
+    return "Office instalado y configurado correctamente con MSOI."
+}}
+
+$isLocal = ($target -eq '127.0.0.1' -or $target -eq 'localhost' -or $target -eq $env:COMPUTERNAME -or $target -eq $env:COMPUTERNAME.ToLower())
+if ($isLocal) {{
+    & $sb $channel $prodId $visioId $projId $lang $arch $excludeApps $incProj $incVisio $activate
+}} else {{
+    Invoke-Command -ComputerName $target -ScriptBlock $sb -ArgumentList $channel, $prodId, $visioId, $projId, $lang, $arch, $excludeApps, $incProj, $incVisio, $activate -ErrorAction Stop
+}}
+"#,
+        target = ps_escape(clean_target),
+        channel = ps_escape(channel),
+        prod_id = ps_escape(prod_id),
+        visio_id = ps_escape(visio_id),
+        proj_id = ps_escape(proj_id),
+        lang = ps_escape(lang),
+        arch = ps_escape(arch),
+        excludes = excludes_script,
+        inc_proj = inc_proj_str,
+        inc_visio = inc_visio_str,
+        activate = activate_str
+    );
+
+    let output = run_powershell_script(&script)?;
+    if output.contains("Error") && !output.contains("instalado y configurado") {
+        Err(output.trim().to_string())
+    } else {
+        Ok(format!("¡Despliegue exitoso en {}! Microsoft Office configurado correctamente.", clean_target))
+    }
 }
 
 // ── Punto de Entrada de la Aplicación ─────────────────────────────────────────
