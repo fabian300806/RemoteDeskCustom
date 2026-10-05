@@ -14,3 +14,5 @@ scratch/
 # Sensitive or generated license files
 *.lic
 *.key
+*.pfx
+certificados/
