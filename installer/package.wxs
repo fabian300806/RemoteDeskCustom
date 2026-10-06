@@ -1,0 +1,44 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Lili enterprise NET"
+           Manufacturer="Lili enterprise NET"
+           Version="0.1.9.0"
+           UpgradeCode="4D9F8E7C-1234-4567-89AB-CDEF01234567"
+           Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="Ya existe una versión más reciente de Lili enterprise NET instalada." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Lili enterprise NET">
+        <Component Id="MainExecutable" Guid="E6F7A9B1-28C3-49F1-9A84-18D2B4459C72">
+          <File Id="LanternScanExe" Source="target\release\lantern_scan.exe" Name="Lili-Enterprise-NET.exe" KeyPath="yes">
+            <Shortcut Id="AppShortcut"
+                      Directory="ProgramMenuFolder"
+                      Name="Lili enterprise NET"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="AppIcon"
+                      Advertise="yes" />
+            <Shortcut Id="DesktopShortcut"
+                      Directory="DesktopFolder"
+                      Name="Lili enterprise NET"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="AppIcon"
+                      Advertise="yes" />
+          </File>
+          <File Id="LanternScanCompat" Source="target\release\lantern_scan.exe" Name="lantern_scan.exe" />
+          <File Id="KeygenExe" Source="target\release\keygen.exe" />
+          <File Id="AppIco" Source="assets\icon.ico" />
+          <File Id="AppLogo" Source="assets\logo.png" />
+          <File Id="BatLaunch" Source="Iniciar-Lili-enterprise-NET.bat" />
+          <File Id="BatLic" Source="Generar-Licencias.bat" />
+          <File Id="PsLic" Source="Generar-Licencias.ps1" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+  </Package>
+</Wix>

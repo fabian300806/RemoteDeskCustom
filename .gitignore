@@ -1,5 +1,7 @@
 # Build artifacts
 /target
+/dist
+*.wixpdb
 Cargo.lock
 
 # Temporary and log files
