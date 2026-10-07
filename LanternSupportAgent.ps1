@@ -1,4 +1,4 @@
-﻿# Lantern Support Agent
+# Lantern Support Agent
 # Deploy through a GPO user logon script. The agent runs in the user's interactive session.
 # Commands are written by an administrator to HKLM:\Software\Lantern\Support.
 
@@ -202,6 +202,81 @@ function Show-LockPrompt {
 }
 
 # ---------------------------------------------------------------------------
+# Diálogo de mensaje de texto / asistencia remota
+# ---------------------------------------------------------------------------
+function Show-SupportMessageDialog([string]$title, [string]$body, [int]$timeoutSecs) {
+    try {
+        $dialog                 = New-Object System.Windows.Forms.Form
+        $dialog.Text            = if ($title) { $title } else { 'Lili enterprise NET - Soporte TI' }
+        $dialog.StartPosition   = 'CenterScreen'
+        $dialog.Size            = New-Object System.Drawing.Size(480, 260)
+        $dialog.TopMost         = $true
+        $dialog.FormBorderStyle = 'FixedDialog'
+        $dialog.MaximizeBox     = $false
+        $dialog.MinimizeBox     = $false
+        $dialog.BackColor       = [System.Drawing.Color]::FromArgb(24, 28, 38)
+
+        # Encabezado con color de acento cian
+        $header                 = New-Object System.Windows.Forms.Panel
+        $header.Dock            = [System.Windows.Forms.DockStyle]::Top
+        $header.Height          = 45
+        $header.BackColor       = [System.Drawing.Color]::FromArgb(35, 42, 58)
+        $dialog.Controls.Add($header)
+
+        $headLabel              = New-Object System.Windows.Forms.Label
+        $headLabel.Text         = if ($title) { $title } else { 'Mensaje de Soporte TI' }
+        $headLabel.Font         = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
+        $headLabel.ForeColor    = [System.Drawing.Color]::FromArgb(56, 189, 248)
+        $headLabel.Location     = New-Object System.Drawing.Point(16, 12)
+        $headLabel.AutoSize     = $true
+        $header.Controls.Add($headLabel)
+
+        # Mensaje de texto
+        $bodyLabel              = New-Object System.Windows.Forms.Label
+        $bodyLabel.Text         = $body
+        $bodyLabel.Font         = New-Object System.Drawing.Font('Segoe UI', 10)
+        $bodyLabel.ForeColor    = [System.Drawing.Color]::White
+        $bodyLabel.Location     = New-Object System.Drawing.Point(20, 60)
+        $bodyLabel.Size         = New-Object System.Drawing.Size(425, 115)
+        $dialog.Controls.Add($bodyLabel)
+
+        # Botón de confirmación
+        $okBtn                  = New-Object System.Windows.Forms.Button
+        $okBtn.Text             = 'Entendido'
+        $okBtn.Location         = New-Object System.Drawing.Point(180, 185)
+        $okBtn.Size             = New-Object System.Drawing.Size(120, 32)
+        $okBtn.BackColor        = [System.Drawing.Color]::FromArgb(56, 189, 248)
+        $okBtn.ForeColor        = [System.Drawing.Color]::Black
+        $okBtn.FlatStyle        = [System.Windows.Forms.FlatStyle]::Flat
+        $okBtn.Font             = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
+        $okBtn.DialogResult     = [System.Windows.Forms.DialogResult]::OK
+        $dialog.Controls.Add($okBtn)
+
+        $dialog.AcceptButton    = $okBtn
+        $dialog.Add_Shown({ [LanternInput]::SetForegroundWindow($dialog.Handle) | Out-Null })
+
+        $timer = $null
+        if ($timeoutSecs -gt 0) {
+            $timer = New-Object System.Windows.Forms.Timer
+            $timer.Interval = $timeoutSecs * 1000
+            $timer.Add_Tick({
+                $timer.Stop()
+                $dialog.Close()
+            })
+            $timer.Start()
+        }
+
+        $dialog.ShowDialog() | Out-Null
+    } catch {
+        Write-Log "ShowMessageError=$($_.Exception.Message)"
+    } finally {
+        if ($timer) { try { $timer.Dispose() } catch {} }
+        if ($dialog) { try { $dialog.Dispose() } catch {} }
+    }
+}
+
+
+# ---------------------------------------------------------------------------
 # Toast de aviso (solo informativo, no intercepta nada)
 # ---------------------------------------------------------------------------
 function Show-Toast {
@@ -210,7 +285,7 @@ function Show-Toast {
         # NO bloquean sesiones RDP entrantes.
         $hooked = [LanternInput]::Install()
         if (-not $hooked) {
-            Write-Log "Hook install failed — input may not be fully blocked"
+            Write-Log "Hook install failed - input may not be fully blocked"
         } else {
             Write-Log "Hooks installed (keyboard+mouse blocked locally)"
         }
@@ -269,7 +344,7 @@ try {
     $mutex     = New-Object System.Threading.Mutex -ArgumentList $false, "Global\LanternSupportAgent-$sessionId"
     $ownsMutex = $mutex.WaitOne(0)
     if (-not $ownsMutex) {
-        Write-Log "Agent already running in session $sessionId — exiting duplicate"
+        Write-Log "Agent already running in session $sessionId - exiting duplicate"
         return
     }
     if (-not (Test-InteractiveSession)) {
@@ -300,15 +375,21 @@ public class LanternQueue {
 
         while ($true) {
             try {
-                $state = Get-ItemProperty -Path $statePath -ErrorAction Stop
-                $id     = [string]$state.CommandId
-                $action = [string]$state.Action
-
-                if ($id -and $id -ne $lastCommandId) {
-                    $lastCommandId = $id
-                    RegLog "Queuing Action=$action Id=$id"
-                    # Encolar la acción para el hilo principal
-                    [LanternQueue]::Commands.Enqueue("$action|$id")
+                $paths = @($statePath, 'HKLM:\Software\ILINet\Support', 'HKLM:\Software\Lantern\Support') | Select-Object -Unique
+                foreach ($p in $paths) {
+                    if (Test-Path $p) {
+                        $state = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
+                        if ($state) {
+                            $id     = [string]$state.CommandId
+                            $action = [string]$state.Action
+                            if ($id -and $id -ne $lastCommandId) {
+                                $lastCommandId = $id
+                                RegLog "Queuing Action=$action Id=$id from $p"
+                                # Encolar la acción para el hilo principal
+                                [LanternQueue]::Commands.Enqueue("$action|$id")
+                            }
+                        }
+                    }
                 }
             } catch {}
             Start-Sleep -Milliseconds 400
@@ -365,6 +446,30 @@ public class LanternQueue {
                 $lockedAt = $null
                 Close-Toast ([ref]$toastForm)
                 Set-AgentStatus 'Ready' $cmdId $action
+            } elseif ($action -eq 'ShowMessage' -or $action -eq 'SendMessage') {
+                $msgText  = ''
+                $msgTitle = 'Mensaje de Soporte TI'
+                $msgTime  = 0
+                $paths = @($statePath, 'HKLM:\Software\ILINet\Support', 'HKLM:\Software\Lantern\Support') | Select-Object -Unique
+                foreach ($p in $paths) {
+                    try {
+                        if (Test-Path $p) {
+                            $txt = [string](Get-ItemPropertyValue -Path $p -Name MessageText -ErrorAction SilentlyContinue)
+                            if ($txt) {
+                                $msgText  = $txt
+                                $msgTitle = [string](Get-ItemPropertyValue -Path $p -Name MessageTitle -ErrorAction SilentlyContinue)
+                                $msgTime  = [int](Get-ItemPropertyValue -Path $p -Name MessageTimeout -ErrorAction SilentlyContinue)
+                                break
+                            }
+                        }
+                    } catch {}
+                }
+                if (-not $msgTitle) { $msgTitle = 'Lili enterprise NET - Soporte TI' }
+                if ($msgText) {
+                    Write-Log "Showing message dialog: $msgTitle - $msgText"
+                    Show-SupportMessageDialog $msgTitle $msgText $msgTime
+                    Set-AgentStatus 'MessageDisplayed' $cmdId $action
+                }
             }
         }
 

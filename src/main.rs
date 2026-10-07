@@ -36,6 +36,22 @@ const ORANGE:      Color32 = Color32::from_rgb(251, 146, 60);  // Naranja SSH
 const TEAL:        Color32 = Color32::from_rgb(45, 212, 191);  // Turquesa WMI
 const SIDEBAR_W:   f32     = 230.0;
 const DETAIL_W:    f32     = 370.0;
+const PROTECTED_LOCAL_IP: &str = "10.35.12.5";
+
+/// Verifica si la IP o hostname corresponde al equipo local de administración (10.35.12.5 o localhost)
+/// para evitar conexiones remotas no deseadas hacia este propio equipo.
+fn is_self_or_protected_host(ip: &str, hostname: &str) -> bool {
+    let clean_ip = ip.trim();
+    if clean_ip == PROTECTED_LOCAL_IP || clean_ip == "127.0.0.1" || clean_ip.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(comp_name) = std::env::var("COMPUTERNAME") {
+        if !comp_name.is_empty() && hostname.eq_ignore_ascii_case(&comp_name) {
+            return true;
+        }
+    }
+    false
+}
 
 // ── Módulo de Autenticación Local SQLite y Roles (RBAC) ───────────────────────
 mod auth;
@@ -838,6 +854,19 @@ struct LanternApp {
     msoi_status_msg: Option<(String, Color32)>,
     msoi_receiver: Option<Receiver<Result<String, String>>>,
     logo_texture: Option<egui::TextureHandle>,
+
+    // Modal de Envío de Mensaje de Texto a Pantalla Remota
+    msg_show_modal: bool,
+    msg_target_host: String,
+    msg_target_ip: String,
+    msg_target_session: String,
+    msg_title: String,
+    msg_body: String,
+    msg_timeout_secs: u32,
+    msg_sending: bool,
+    msg_status_msg: Option<(String, Color32)>,
+    msg_receiver: Option<Receiver<Result<String, String>>>,
+    msg_detected_sessions: Vec<String>,
 }
 
 impl Default for LanternApp {
@@ -1079,6 +1108,17 @@ impl Default for LanternApp {
             msoi_status_msg: None,
             msoi_receiver: None,
             logo_texture: None,
+            msg_show_modal: false,
+            msg_target_host: String::new(),
+            msg_target_ip: String::new(),
+            msg_target_session: "*".to_string(),
+            msg_title: "Soporte TI — Lili enterprise NET".to_string(),
+            msg_body: String::new(),
+            msg_timeout_secs: 60,
+            msg_sending: false,
+            msg_status_msg: None,
+            msg_receiver: None,
+            msg_detected_sessions: Vec::new(),
         };
 
         if let Some(lic) = &saved_license {
@@ -8753,6 +8793,10 @@ impl LanternApp {
                                             ui.add_space(4.0);
                                             let c = if selected { ACCENT } else if is_on { TEXT_PRI } else { TEXT_DIM };
                                             ui.label(RichText::new(&device.hostname).size(12.0).strong().color(c));
+                                            if is_self_or_protected_host(&device.ip, &device.hostname) {
+                                                ui.add_space(4.0);
+                                                badge(ui, "ESTE EQUIPO", Color32::from_rgba_unmultiplied(248, 113, 113, 22), DANGER);
+                                            }
                                         });
 
                                         // 2. IP
@@ -8975,6 +9019,8 @@ impl LanternApp {
         let Some(device) = self.devices.get(idx).cloned() else { return };
         let w = ui.available_width();
 
+        let is_protected_self = is_self_or_protected_host(&device.ip, &device.hostname);
+
         egui::Frame::none()
             .fill(SURFACE_1)
             .stroke(Stroke::new(1.0_f32, BORDER))
@@ -8998,7 +9044,13 @@ impl LanternApp {
                     device_type_badge(ui, device.device_type);
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(&device.hostname).size(14.0).strong().color(TEXT_PRI));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&device.hostname).size(14.0).strong().color(TEXT_PRI));
+                            if is_protected_self {
+                                ui.add_space(6.0);
+                                badge(ui, "ESTE EQUIPO (PROTEGIDO)", Color32::from_rgba_unmultiplied(248, 113, 113, 25), DANGER);
+                            }
+                        });
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&device.ip).size(11.5).monospace().color(TEXT_SEC));
@@ -9014,6 +9066,25 @@ impl LanternApp {
                         });
                     });
                 });
+
+                if is_protected_self {
+                    ui.add_space(10.0);
+                    egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(248, 113, 113, 20))
+                        .stroke(Stroke::new(1.0_f32, DANGER))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(12.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🛡️").size(18.0));
+                                ui.add_space(6.0);
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("Equipo Local Protegido (10.35.12.5)").size(11.5).strong().color(DANGER));
+                                    ui.label(RichText::new("Conexiones remotas desde esta consola deshabilitadas para evitar conflictos y bucles.").size(9.5).color(TEXT_PRI));
+                                });
+                            });
+                        });
+                }
 
                 ui.add_space(10.0);
                 divider(ui);
@@ -9049,6 +9120,18 @@ impl LanternApp {
                     ui.add_space(5.0);
                     if action_btn(ui, "📁 D$", SURFACE_2, TEXT_SEC) {
                         open_remote_drive(&device.ip, "D");
+                    }
+                    ui.add_space(5.0);
+                    if action_btn_color(
+                        ui,
+                        "💬 Enviar Mensaje",
+                        Color32::from_rgba_unmultiplied(56, 189, 248, 28),
+                        ACCENT,
+                    ) {
+                        let sessions: Vec<String> = device.sessions.iter().map(|s| s.username.clone()).collect();
+                        let sel_user = self.selected_session
+                            .and_then(|(sd, ss)| if sd == idx { device.sessions.get(ss).map(|s| s.username.as_str()) } else { None });
+                        self.open_send_message_modal(&device.hostname, &device.ip, sel_user, sessions);
                     }
                     ui.add_space(5.0);
                     if action_btn_color(
@@ -9129,9 +9212,24 @@ impl LanternApp {
 
                 // ── Escritorio Remoto y Shadow ───────────────────────────────
                 ui.label(RichText::new("ACCESO REMOTO RÁPIDO").size(9.5).strong().color(TEXT_DIM));
-                ui.add_space(8.0);
-
-                if let Some((sd, ss)) = self.selected_session {
+                if is_protected_self {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(248, 113, 113, 16))
+                        .stroke(Stroke::new(1.0_f32, DANGER))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(12.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.set_width(w - 4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🚫").size(18.0));
+                                ui.add_space(6.0);
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("Acceso remoto deshabilitado para este equipo").size(11.5).strong().color(DANGER));
+                                    ui.label(RichText::new("La IP 10.35.12.5 es tu máquina local. Se han bloqueado RDP, Shadow y Consola.").size(10.0).color(TEXT_PRI));
+                                });
+                            });
+                        });
+                } else if let Some((sd, ss)) = self.selected_session {
                     if sd == idx {
                         if let Some(session) = device.sessions.get(ss) {
                             ui.horizontal_wrapped(|ui| {
@@ -9145,6 +9243,16 @@ impl LanternApp {
                                 ui.add_space(5.0);
                                 if action_btn_accent(ui, "RDP Directo") {
                                     open_rdp_session(&device.hostname, &device.ip);
+                                }
+                                ui.add_space(5.0);
+                                if action_btn_color(
+                                    ui,
+                                    "💬 Mensaje a Sesión",
+                                    Color32::from_rgba_unmultiplied(56, 189, 248, 25),
+                                    ACCENT,
+                                ) {
+                                    let sessions: Vec<String> = device.sessions.iter().map(|s| s.username.clone()).collect();
+                                    self.open_send_message_modal(&device.hostname, &device.ip, Some(&session.username), sessions);
                                 }
                             });
                         } else {
@@ -9168,6 +9276,39 @@ impl LanternApp {
                         ui.add_space(6.0);
                         ui.label(RichText::new("Selecciona una sesión de arriba para activar el modo Shadow.").size(10.5).color(TEXT_DIM));
                     }
+                }
+
+                ui.add_space(12.0);
+                divider(ui);
+                ui.add_space(12.0);
+
+                // ── Mensajería de Red y Notificaciones Directas ──────────────
+                ui.label(RichText::new("MENSAJERÍA DE RED Y NOTIFICACIONES").size(9.5).strong().color(TEXT_DIM));
+                ui.add_space(8.0);
+                let msg_card = egui::Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(56, 189, 248, 20))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(56, 189, 248, 70)))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(Margin::symmetric(14.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.set_width(w - 4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("💬").size(22.0));
+                            ui.add_space(8.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("Enviar Mensaje de Texto a Pantalla").size(12.5).strong().color(ACCENT));
+                                ui.label(RichText::new("Notificación emergente a usuarios activos en este equipo").size(10.0).color(TEXT_SEC));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("Redactar ➜").size(11.0).strong().color(ACCENT));
+                            });
+                        });
+                    });
+                if msg_card.response.interact(egui::Sense::click()).clicked() {
+                    let sessions: Vec<String> = device.sessions.iter().map(|s| s.username.clone()).collect();
+                    let sel_user = self.selected_session
+                        .and_then(|(sd, ss)| if sd == idx { device.sessions.get(ss).map(|s| s.username.as_str()) } else { None });
+                    self.open_send_message_modal(&device.hostname, &device.ip, sel_user, sessions);
                 }
 
                 ui.add_space(12.0);
@@ -9259,19 +9400,23 @@ impl LanternApp {
                             ui.checkbox(&mut self.cred_console_mode, RichText::new("Conectar a Pantalla de Inicio / Consola (/admin)").size(10.0).color(TEXT_SEC));
                             ui.add_space(8.0);
 
-                            ui.horizontal_wrapped(|ui| {
-                                if action_btn_accent(ui, "🔑 Iniciar Sesión RDP") {
-                                    connect_rdp_credentials(&device.hostname, &device.ip, &self.cred_username, &self.cred_password, self.cred_console_mode);
-                                    self.add_log("RDP", &format!("Conectando con credenciales hacia {}", device.ip), ACCENT);
-                                    self.notify("Conexión con credenciales enviada", SUCCESS);
-                                }
-                                ui.add_space(5.0);
-                                if action_btn(ui, "💻 PowerShell", SURFACE_3, TEXT_PRI) {
-                                    open_remote_powershell(&device.hostname, &device.ip, &self.cred_username);
-                                    self.add_log("PowerShell", &format!("Consola PowerShell remota abierta para {}", device.ip), PURPLE);
-                                    self.notify("Consola PowerShell remota abierta", PURPLE);
-                                }
-                            });
+                            if is_protected_self {
+                                ui.label(RichText::new("🛡️ Conexión RDP y PowerShell bloqueadas hacia tu propio equipo local (10.35.12.5).").size(10.5).color(DANGER));
+                            } else {
+                                ui.horizontal_wrapped(|ui| {
+                                    if action_btn_accent(ui, "🔑 Iniciar Sesión RDP") {
+                                        connect_rdp_credentials(&device.hostname, &device.ip, &self.cred_username, &self.cred_password, self.cred_console_mode);
+                                        self.add_log("RDP", &format!("Conectando con credenciales hacia {}", device.ip), ACCENT);
+                                        self.notify("Conexión con credenciales enviada", SUCCESS);
+                                    }
+                                    ui.add_space(5.0);
+                                    if action_btn(ui, "💻 PowerShell", SURFACE_3, TEXT_PRI) {
+                                        open_remote_powershell(&device.hostname, &device.ip, &self.cred_username);
+                                        self.add_log("PowerShell", &format!("Consola PowerShell remota abierta para {}", device.ip), PURPLE);
+                                        self.notify("Consola PowerShell remota abierta", PURPLE);
+                                    }
+                                });
+                            }
                         });
                 }
 
@@ -9283,19 +9428,23 @@ impl LanternApp {
                 ui.label(RichText::new("CONTROL DEL AGENTE LILI ENTERPRISE NET").size(9.5).strong().color(TEXT_DIM));
                 ui.add_space(8.0);
 
-                ui.horizontal_wrapped(|ui| {
-                    if action_btn_color(ui, "🔒 Bloquear Entrada", Color32::from_rgba_unmultiplied(251, 191, 36, 25), WARNING) {
-                        send_support_command(&device.hostname, &device.ip, "RequestLock");
-                        self.add_log("Soporte", &format!("Solicitud de bloqueo enviada ➜ {}", device.ip), WARNING);
-                        self.notify("Bloqueo de entrada solicitado con consentimiento", WARNING);
-                    }
-                    ui.add_space(5.0);
-                    if action_btn_color(ui, "🔓 Desbloquear", Color32::from_rgba_unmultiplied(52, 211, 153, 22), SUCCESS) {
-                        send_support_command(&device.hostname, &device.ip, "Unlock");
-                        self.add_log("Soporte", &format!("Desbloqueo enviado ➜ {}", device.ip), SUCCESS);
-                        self.notify("Entrada desbloqueada", SUCCESS);
-                    }
-                });
+                if is_protected_self {
+                    ui.label(RichText::new("🛡️ Acciones de bloqueo deshabilitadas para tu propio equipo local (10.35.12.5).").size(10.5).color(TEXT_DIM));
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        if action_btn_color(ui, "🔒 Bloquear Entrada", Color32::from_rgba_unmultiplied(251, 191, 36, 25), WARNING) {
+                            send_support_command(&device.hostname, &device.ip, "RequestLock");
+                            self.add_log("Soporte", &format!("Solicitud de bloqueo enviada ➜ {}", device.ip), WARNING);
+                            self.notify("Bloqueo de entrada solicitado con consentimiento", WARNING);
+                        }
+                        ui.add_space(5.0);
+                        if action_btn_color(ui, "🔓 Desbloquear", Color32::from_rgba_unmultiplied(52, 211, 153, 22), SUCCESS) {
+                            send_support_command(&device.hostname, &device.ip, "Unlock");
+                            self.add_log("Soporte", &format!("Desbloqueo enviado ➜ {}", device.ip), SUCCESS);
+                            self.notify("Entrada desbloqueada", SUCCESS);
+                        }
+                    });
+                }
 
                 ui.add_space(10.0);
                 ui.label(
@@ -10834,6 +10983,351 @@ if ($isLocal) {{
             self.msoi_show_modal = false;
         }
     }
+
+    fn open_send_message_modal(
+        &mut self,
+        hostname: &str,
+        ip: &str,
+        default_session: Option<&str>,
+        detected_sessions: Vec<String>,
+    ) {
+        self.msg_target_host = hostname.to_string();
+        self.msg_target_ip = ip.to_string();
+        self.msg_target_session = default_session.unwrap_or("*").to_string();
+        self.msg_detected_sessions = detected_sessions;
+        if self.msg_title.trim().is_empty() {
+            self.msg_title = "Soporte TI — Lili enterprise NET".to_string();
+        }
+        self.msg_status_msg = None;
+        self.msg_sending = false;
+        self.msg_show_modal = true;
+
+        let display = if hostname.is_empty() || hostname.starts_with("host-") { ip } else { hostname };
+        self.notify(&format!("Redactando mensaje para {}", display), ACCENT);
+    }
+
+    fn poll_send_message(&mut self) {
+        let mut finished_res = None;
+        if let Some(rx) = &self.msg_receiver {
+            if let Ok(res) = rx.try_recv() {
+                finished_res = Some(res);
+            }
+        }
+        if let Some(res) = finished_res {
+            self.msg_sending = false;
+            self.msg_receiver = None;
+            match res {
+                Ok(msg) => {
+                    self.msg_status_msg = Some((msg.clone(), SUCCESS));
+                    self.notify(&msg, SUCCESS);
+                    self.add_log("Mensajería", &msg, SUCCESS);
+                }
+                Err(err) => {
+                    self.msg_status_msg = Some((format!("Error: {}", err), DANGER));
+                    self.notify(&format!("Error al enviar mensaje: {}", err), DANGER);
+                    self.add_log("Mensajería", &format!("Fallo al enviar mensaje: {}", err), DANGER);
+                }
+            }
+        }
+    }
+
+    fn send_message_remote(&mut self) {
+        if self.msg_sending || self.msg_body.trim().is_empty() {
+            return;
+        }
+        self.msg_sending = true;
+        self.msg_status_msg = None;
+
+        let host = self.msg_target_host.clone();
+        let ip = self.msg_target_ip.clone();
+        let target = if host.starts_with("host-") || host.is_empty() {
+            ip.clone()
+        } else {
+            host.clone()
+        };
+        let session = if self.msg_target_session.trim().is_empty() {
+            "*".to_string()
+        } else {
+            self.msg_target_session.trim().to_string()
+        };
+        let title = self.msg_title.trim().to_string();
+        let body = self.msg_body.trim().to_string();
+        let timeout = self.msg_timeout_secs;
+
+        let preview = body.lines().next().unwrap_or("").to_string();
+        self.add_log(
+            "Mensajería",
+            &format!("Transmitiendo mensaje a {} (sesión {}): \"{}\"", target, session, preview),
+            ACCENT,
+        );
+
+        let (tx, rx) = mpsc::channel();
+        self.msg_receiver = Some(rx);
+
+        thread::spawn(move || {
+            let res = send_text_message_remote_sync(&target, &session, timeout, &title, &body);
+            let _ = tx.send(res);
+        });
+    }
+
+    fn ui_send_message_modal(&mut self, ctx: &egui::Context) {
+        if !self.msg_show_modal {
+            return;
+        }
+
+        // Fondo oscuro tipo modal para enfocar la ventana
+        egui::Area::new(egui::Id::new("msg_modal_dimmer"))
+            .interactable(true)
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.allocate_rect(screen, egui::Sense::click());
+                ui.painter().rect_filled(screen, Rounding::ZERO, Color32::from_black_alpha(160));
+            });
+
+        let mut close = false;
+        let mut trigger_send = false;
+
+        let target_display = if self.msg_target_host.is_empty() || self.msg_target_host.starts_with("host-") {
+            self.msg_target_ip.clone()
+        } else {
+            format!("{} ({})", self.msg_target_host, self.msg_target_ip)
+        };
+
+        egui::Window::new("💬 Enviar Mensaje de Texto a Pantalla Remota")
+            .id(egui::Id::new("msg_modal_dialog_box"))
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .default_size(Vec2::new(600.0, 530.0))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .frame(
+                egui::Frame::none()
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, BORDER_LT))
+                    .rounding(Rounding::same(12.0))
+                    .inner_margin(Margin::same(20.0))
+            )
+            .show(ctx, |ui| {
+                // Header
+                ui.horizontal(|ui| {
+                    let icon_box = egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(56, 189, 248, 25))
+                        .stroke(Stroke::new(1.0_f32, ACCENT))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::same(10.0));
+                    icon_box.show(ui, |ui| {
+                        ui.label(RichText::new("💬").size(24.0));
+                    });
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Mensajería Directa a Pantalla de Equipo").size(15.0).strong().color(TEXT_PRI));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Equipo destino:").size(11.0).color(TEXT_DIM));
+                            ui.label(RichText::new(&target_display).size(11.5).strong().color(ACCENT));
+                        });
+                    });
+                });
+
+                ui.add_space(12.0);
+                divider(ui);
+                ui.add_space(10.0);
+
+                // Sección 1: Destinatario / Sesión
+                ui.label(RichText::new("1. DESTINATARIO / SESIÓN").size(10.0).strong().color(TEXT_DIM));
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    let all_active = self.msg_target_session == "*";
+                    let btn_all = egui::Button::new(
+                        RichText::new("🌐 Todas las sesiones activas (*)")
+                            .size(11.0)
+                            .strong()
+                            .color(if all_active { BASE } else { TEXT_PRI })
+                    )
+                    .fill(if all_active { ACCENT } else { SURFACE_2 })
+                    .rounding(Rounding::same(6.0));
+                    if ui.add(btn_all).clicked() {
+                        self.msg_target_session = "*".to_string();
+                    }
+
+                    for sess in &self.msg_detected_sessions {
+                        let active = self.msg_target_session == *sess;
+                        let btn_s = egui::Button::new(
+                            RichText::new(format!("👤 {}", sess))
+                                .size(11.0)
+                                .color(if active { BASE } else { TEXT_SEC })
+                        )
+                        .fill(if active { PURPLE } else { SURFACE_2 })
+                        .rounding(Rounding::same(6.0));
+                        if ui.add(btn_s).clicked() {
+                            self.msg_target_session = sess.clone();
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Sesión manual:").size(10.0).color(TEXT_DIM));
+                    custom_text_input(ui, &mut self.msg_target_session, "* o ID sesión o usuario", 180.0);
+                });
+
+                ui.add_space(10.0);
+                divider(ui);
+                ui.add_space(10.0);
+
+                // Sección 2: Encabezado / Remitente
+                ui.label(RichText::new("2. REMITENTE / ENCABEZADO DEL MENSAJE").size(10.0).strong().color(TEXT_DIM));
+                ui.add_space(5.0);
+                custom_text_input(ui, &mut self.msg_title, "Ej. Soporte TI — Lili enterprise NET", 400.0);
+
+                ui.add_space(10.0);
+                divider(ui);
+                ui.add_space(10.0);
+
+                // Sección 3: Contenido del Mensaje
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("3. MENSAJE DE TEXTO A MOSTRAR").size(10.0).strong().color(TEXT_DIM));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{} caracteres", self.msg_body.chars().count())).size(9.5).color(TEXT_DIM));
+                    });
+                });
+                ui.add_space(5.0);
+                egui::Frame::none()
+                    .fill(SURFACE_2)
+                    .stroke(Stroke::new(1.0_f32, BORDER_LT))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.msg_body)
+                                .hint_text("Escriba el mensaje que aparecerá en pantalla al usuario...")
+                                .font(FontId::proportional(12.0))
+                                .desired_rows(3)
+                                .desired_width(ui.available_width())
+                                .frame(false)
+                        );
+                    });
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("Plantillas rápidas recomendadas:").size(9.5).color(TEXT_DIM));
+                ui.add_space(3.0);
+                ui.horizontal_wrapped(|ui| {
+                    let presets = [
+                        ("⚠️ Mantenimiento 5m", "Mantenimiento preventivo de TI en 5 minutos. Por favor guarde su trabajo y cierre sus aplicaciones."),
+                        ("🔄 Reinicio necesario", "Se requiere reiniciar este equipo para aplicar actualizaciones críticas del sistema. Guarde sus archivos."),
+                        ("📞 Contactar a TI", "Por favor comuníquese con el departamento de Sistemas / TI a la extensión de soporte."),
+                        ("🛠️ Asistencia técnica", "El equipo de soporte técnico iniciará una sesión de asistencia en este equipo en unos instantes."),
+                        ("🔒 Cierre de sesión", "Su sesión en este equipo será finalizada en breve por directivas de seguridad corporativa."),
+                    ];
+                    for (lbl, text) in &presets {
+                        if ui.add(
+                            egui::Button::new(RichText::new(*lbl).size(10.0).color(TEXT_SEC))
+                                .fill(SURFACE_3)
+                                .rounding(Rounding::same(4.0))
+                        ).clicked() {
+                            self.msg_body = (*text).to_string();
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+                divider(ui);
+                ui.add_space(10.0);
+
+                // Sección 4: Tiempo en Pantalla
+                ui.label(RichText::new("4. TIEMPO DE VISUALIZACIÓN EN PANTALLA").size(10.0).strong().color(TEXT_DIM));
+                ui.add_space(5.0);
+                ui.horizontal(|ui| {
+                    let timeouts = [
+                        ("30 seg", 30),
+                        ("60 seg (Estándar)", 60),
+                        ("120 seg (2 min)", 120),
+                        ("0 (Hasta clic Aceptar)", 0),
+                    ];
+                    for (lbl, secs) in &timeouts {
+                        let active = self.msg_timeout_secs == *secs;
+                        let btn = egui::Button::new(
+                            RichText::new(*lbl).size(10.5).color(if active { BASE } else { TEXT_SEC })
+                        )
+                        .fill(if active { ACCENT } else { SURFACE_2 })
+                        .rounding(Rounding::same(5.0));
+                        if ui.add(btn).clicked() {
+                            self.msg_timeout_secs = *secs;
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+
+                // Status message (Spinner o Éxito o Error)
+                if self.msg_sending {
+                    ui.add_space(10.0);
+                    egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(56, 189, 248, 20))
+                        .stroke(Stroke::new(1.0_f32, ACCENT))
+                        .rounding(Rounding::same(6.0))
+                        .inner_margin(Margin::symmetric(10.0, 7.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("Transmitiendo mensaje al equipo remoto mediante WinRM y RPC de Windows...").size(11.0).color(ACCENT));
+                            });
+                        });
+                } else if let Some((msg, col)) = &self.msg_status_msg {
+                    ui.add_space(10.0);
+                    egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 22))
+                        .stroke(Stroke::new(1.0_f32, *col))
+                        .rounding(Rounding::same(6.0))
+                        .inner_margin(Margin::symmetric(10.0, 7.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let icon = if *col == SUCCESS { "✔" } else { "⚠" };
+                                ui.label(RichText::new(icon).size(12.0).strong().color(*col));
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(msg).size(11.0).color(TEXT_PRI));
+                            });
+                        });
+                }
+
+                ui.add_space(14.0);
+                divider(ui);
+                ui.add_space(12.0);
+
+                // Footer
+                ui.horizontal(|ui| {
+                    if ui.add(
+                        egui::Button::new(RichText::new("✕ Cerrar").size(11.5).color(TEXT_SEC))
+                            .fill(SURFACE_2)
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(90.0, 32.0))
+                    ).clicked() {
+                        close = true;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let can_send = !self.msg_sending && !self.msg_body.trim().is_empty();
+                        let send_btn = egui::Button::new(
+                            RichText::new("🚀 Enviar Mensaje a Pantalla").size(12.0).strong().color(if can_send { BASE } else { TEXT_DIM })
+                        )
+                        .fill(if can_send { ACCENT } else { SURFACE_3 })
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(220.0, 32.0));
+
+                        if ui.add_enabled(can_send, send_btn).clicked() {
+                            trigger_send = true;
+                        }
+                    });
+                });
+            });
+
+        if trigger_send {
+            self.send_message_remote();
+        }
+        if close {
+            self.msg_show_modal = false;
+        }
+    }
 }
 
 // ── eframe::App Implementation ────────────────────────────────────────────────
@@ -10857,6 +11351,7 @@ impl eframe::App for LanternApp {
         self.poll_fs();
         self.poll_updater(ctx);
         self.poll_msoi();
+        self.poll_send_message();
 
         // Validar expiración de período de prueba de 10 días
         if let Some(lic) = &self.license {
@@ -11047,6 +11542,8 @@ impl eframe::App for LanternApp {
         self.ui_updater_modal(ctx);
         // Renderizar Modal de Instalación Remota de Microsoft Office (MSOI)
         self.ui_msoi_modal(ctx);
+        // Renderizar Modal de Envío de Mensaje de Texto a Equipo Remoto
+        self.ui_send_message_modal(ctx);
     }
 }
 
@@ -11351,6 +11848,10 @@ fn open_remote_drive(ip: &str, drive: &str) {
 }
 
 fn open_shadow_session(hostname: &str, ip: &str, session_id: &str, control: bool) {
+    if is_self_or_protected_host(ip, hostname) {
+        eprintln!("Bloqueado: Intento de sesión Shadow al equipo local protegido (10.35.12.5)");
+        return;
+    }
     let host = if hostname.starts_with("host-") { ip } else { hostname };
     let mut cmd = Command::new("mstsc.exe");
     cmd.args([&format!("/shadow:{}", session_id), &format!("/v:{}", host), "/noConsentPrompt"]);
@@ -11360,6 +11861,10 @@ fn open_shadow_session(hostname: &str, ip: &str, session_id: &str, control: bool
 }
 
 fn open_rdp_session(hostname: &str, ip: &str) {
+    if is_self_or_protected_host(ip, hostname) {
+        eprintln!("Bloqueado: Intento de RDP al equipo local protegido (10.35.12.5)");
+        return;
+    }
     let host = if hostname.starts_with("host-") { ip } else { hostname };
     let mut cmd = Command::new("mstsc.exe");
     cmd.arg(&format!("/v:{}", host));
@@ -11368,6 +11873,10 @@ fn open_rdp_session(hostname: &str, ip: &str) {
 }
 
 fn open_console_session(hostname: &str, ip: &str) {
+    if is_self_or_protected_host(ip, hostname) {
+        eprintln!("Bloqueado: Intento de consola /admin al equipo local protegido (10.35.12.5)");
+        return;
+    }
     let host = if hostname.starts_with("host-") { ip } else { hostname };
     let mut cmd = Command::new("mstsc.exe");
     cmd.args(["/admin", &format!("/v:{}", host), "/prompt"]);
@@ -11376,6 +11885,10 @@ fn open_console_session(hostname: &str, ip: &str) {
 }
 
 fn connect_rdp_credentials(hostname: &str, ip: &str, user: &str, pass: &str, console: bool) {
+    if is_self_or_protected_host(ip, hostname) {
+        eprintln!("Bloqueado: Intento de conexión RDP con credenciales al equipo local protegido (10.35.12.5)");
+        return;
+    }
     let host = if hostname.starts_with("host-") { ip } else { hostname };
     let clean_user = user.trim();
 
@@ -11417,6 +11930,10 @@ fn connect_rdp_credentials(hostname: &str, ip: &str, user: &str, pass: &str, con
 }
 
 fn open_remote_powershell(hostname: &str, ip: &str, user: &str) {
+    if is_self_or_protected_host(ip, hostname) {
+        eprintln!("Bloqueado: Intento de PowerShell remoto al equipo local protegido (10.35.12.5)");
+        return;
+    }
     let host = if hostname.starts_with("host-") { ip } else { hostname };
     let clean_user = user.trim();
     let script = if clean_user.is_empty() {
@@ -11430,6 +11947,10 @@ fn open_remote_powershell(hostname: &str, ip: &str, user: &str) {
 }
 
 fn send_support_command(hostname: &str, ip: &str, action: &str) {
+    if is_self_or_protected_host(ip, hostname) {
+        eprintln!("Bloqueado: Intento de orden de agente al equipo local protegido (10.35.12.5)");
+        return;
+    }
     let target = if hostname.starts_with("host-") { ip } else { hostname };
     let id = SystemTime::now().duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos().to_string()).unwrap_or_else(|_| "1".into());
@@ -11466,6 +11987,116 @@ fn test_winrm_connectivity(ip: &str) -> (bool, String) {
             }
         }
         Err(e) => (false, format!("Error al invocar PowerShell: {}", e)),
+    }
+}
+
+fn send_text_message_remote_sync(
+    target: &str,
+    session: &str,
+    timeout_secs: u32,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let clean_target = target.replace(['\'', '"', ';', '$', '`', '\\'], "");
+    let clean_session = session.replace(['\'', '"', ';', '$', '`'], "");
+    let clean_session = if clean_session.is_empty() { "*".to_string() } else { clean_session };
+
+    let ps_title = title.replace('\'', "''");
+    let ps_body = body.replace('\'', "''");
+
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$target = '{target}'
+$session = '{session}'
+$timeout = {timeout}
+$title = '{title}'
+$body = '{body}'
+$delivered = $false
+$errList = @()
+
+# 1. Intentar Invoke-Command vía WinRM (ejecución local de msg.exe dentro del equipo)
+try {{
+    $res = Invoke-Command -ComputerName $target -ScriptBlock {{
+        param($s, $t, $m, $tit)
+        $innerOk = $false
+        try {{
+            $argList = @($s)
+            if ($t -gt 0) {{ $argList += "/time:$t" }}
+            $argList += $m
+            $p = Start-Process -FilePath "msg.exe" -ArgumentList $argList -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+            if ($p.ExitCode -eq 0) {{ $innerOk = $true }}
+        }} catch {{}}
+
+        # También registrar en el agente Lili Support Agent (ambas ramas HKLM)
+        try {{
+            $paths = @('HKLM:\Software\ILINet\Support', 'HKLM:\Software\Lantern\Support')
+            foreach ($p in $paths) {{
+                New-Item -Path $p -Force -EA SilentlyContinue | Out-Null
+                Set-ItemProperty -Path $p -Name Action -Value 'ShowMessage' -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $p -Name CommandId -Value ([guid]::NewGuid().ToString()) -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $p -Name MessageText -Value $m -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $p -Name MessageTitle -Value $tit -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $p -Name MessageTimeout -Value $t -Force -EA SilentlyContinue
+                Set-ItemProperty -Path $p -Name RequestedAt -Value (Get-Date).ToString('o') -Force -EA SilentlyContinue
+            }}
+            $innerOk = $true
+        }} catch {{}}
+        return $innerOk
+    }} -ArgumentList $session, $timeout, $body, $title -ErrorAction Stop
+    $delivered = $true
+}} catch {{
+    $errList += "WinRM: $($_.Exception.Message)"
+}}
+
+# 2. Si WinRM falló, intentar msg.exe directo vía RPC Terminal Services
+if (-not $delivered) {{
+    try {{
+        $argList = @($session, "/server:$target")
+        if ($timeout -gt 0) {{ $argList += "/time:$timeout" }}
+        $argList += $body
+        $p = Start-Process -FilePath "msg.exe" -ArgumentList $argList -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        if ($p.ExitCode -eq 0) {{
+            $delivered = $true
+        }} else {{
+            $errList += "msg.exe directo falló con código $($p.ExitCode)"
+        }}
+    }} catch {{
+        $errList += "msg.exe error: $($_.Exception.Message)"
+    }}
+}}
+
+if ($delivered) {{
+    Write-Output "EXITO"
+}} else {{
+    Write-Error ($errList -join " | ")
+}}
+"#,
+        target = clean_target,
+        session = clean_session,
+        timeout = timeout_secs,
+        title = ps_title,
+        body = ps_body,
+    );
+
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+
+    let output = cmd.output().map_err(|e| format!("Fallo al ejecutar PowerShell: {}", e))?;
+    if output.status.success() {
+        Ok(format!("Mensaje de texto transmitido exitosamente a {}", clean_target))
+    } else {
+        let err_text = String::from_utf8_lossy(&output.stderr);
+        let out_text = String::from_utf8_lossy(&output.stdout);
+        let detail = if !err_text.trim().is_empty() {
+            err_text.trim().to_string()
+        } else if !out_text.trim().is_empty() {
+            out_text.trim().to_string()
+        } else {
+            format!("No se pudo contactar a {} vía WinRM ni RPC (msg.exe)", clean_target)
+        };
+        Err(detail)
     }
 }
 
