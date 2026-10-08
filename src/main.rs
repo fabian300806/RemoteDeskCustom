@@ -35,7 +35,7 @@ const PURPLE:      Color32 = Color32::from_rgb(167, 139, 250); // Lavanda RDP
 const ORANGE:      Color32 = Color32::from_rgb(251, 146, 60);  // Naranja SSH
 const TEAL:        Color32 = Color32::from_rgb(45, 212, 191);  // Turquesa WMI
 const SIDEBAR_W:   f32     = 230.0;
-const DETAIL_W:    f32     = 370.0;
+const DETAIL_W:    f32     = 420.0;
 const PROTECTED_LOCAL_IP: &str = "10.35.12.5";
 
 /// Verifica si la IP o hostname corresponde al equipo local de administración (10.35.12.5 o localhost)
@@ -9017,7 +9017,6 @@ impl LanternApp {
     fn ui_device_detail(&mut self, ui: &mut egui::Ui) {
         let Some(idx) = self.selected_device else { return };
         let Some(device) = self.devices.get(idx).cloned() else { return };
-        let w = ui.available_width();
 
         let is_protected_self = is_self_or_protected_host(&device.ip, &device.hostname);
 
@@ -9025,12 +9024,12 @@ impl LanternApp {
             .fill(SURFACE_1)
             .stroke(Stroke::new(1.0_f32, BORDER))
             .rounding(Rounding::same(12.0))
-            .inner_margin(Margin::same(16.0))
+            .inner_margin(Margin::same(14.0))
             .show(ui, |ui| {
-                ui.set_width(w);
+                let inner_w = ui.available_width();
+                ui.set_width(inner_w);
 
                 // ── Hero Banner del Dispositivo ──────────────────────────────
-                // Fondo con color de acento del tipo de dispositivo
                 let dev_color = device.device_type.color();
                 let hero_rect = ui.max_rect();
                 ui.painter().rect_filled(
@@ -9042,12 +9041,12 @@ impl LanternApp {
 
                 ui.horizontal(|ui| {
                     device_type_badge(ui, device.device_type);
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&device.hostname).size(14.0).strong().color(TEXT_PRI));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&device.hostname).size(13.5).strong().color(TEXT_PRI));
                             if is_protected_self {
-                                ui.add_space(6.0);
+                                ui.add_space(4.0);
                                 badge(ui, "ESTE EQUIPO (PROTEGIDO)", Color32::from_rgba_unmultiplied(248, 113, 113, 25), DANGER);
                             }
                         });
@@ -9073,14 +9072,15 @@ impl LanternApp {
                         .fill(Color32::from_rgba_unmultiplied(248, 113, 113, 20))
                         .stroke(Stroke::new(1.0_f32, DANGER))
                         .rounding(Rounding::same(8.0))
-                        .inner_margin(Margin::symmetric(12.0, 8.0))
+                        .inner_margin(Margin::symmetric(10.0, 8.0))
                         .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("🛡️").size(18.0));
                                 ui.add_space(6.0);
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("Equipo Local Protegido (10.35.12.5)").size(11.5).strong().color(DANGER));
-                                    ui.label(RichText::new("Conexiones remotas desde esta consola deshabilitadas para evitar conflictos y bucles.").size(9.5).color(TEXT_PRI));
+                                    ui.label(RichText::new("Equipo Local Protegido (10.35.12.5)").size(11.0).strong().color(DANGER));
+                                    ui.label(RichText::new("Conexiones remotas desde esta consola deshabilitadas.").size(9.0).color(TEXT_PRI));
                                 });
                             });
                         });
@@ -9088,11 +9088,11 @@ impl LanternApp {
 
                 ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Propiedades de Red ───────────────────────────────────────
-                detail_kv(ui, "Dirección MAC", &device.mac, w);
-                detail_kv(ui, "Puertos Abiertos",  &device.ports_str, w);
+                detail_kv(ui, "Dirección MAC", &device.mac, inner_w);
+                detail_kv(ui, "Puertos Abiertos",  &device.ports_str, inner_w);
                 let lat_col = if device.latency_ms < 10 { SUCCESS } else if device.latency_ms < 60 { WARNING } else { DANGER };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Latencia").size(11.0).color(TEXT_DIM));
@@ -9102,9 +9102,9 @@ impl LanternApp {
                 });
                 ui.add_space(5.0);
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Herramientas Rápidas ─────────────────────────────────────
                 ui.label(RichText::new("DIAGNÓSTICO Y HERRAMIENTAS").size(9.5).strong().color(TEXT_DIM));
@@ -9144,9 +9144,9 @@ impl LanternApp {
                     }
                 });
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Sesiones RDP Detectadas ──────────────────────────────────
                 ui.horizontal(|ui| {
@@ -9166,7 +9166,7 @@ impl LanternApp {
                         .rounding(Rounding::same(8.0))
                         .inner_margin(Margin::symmetric(10.0, 8.0))
                         .show(ui, |ui| {
-                            ui.set_width(w - 4.0);
+                            ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 let dot = ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover()).0;
                                 ui.painter().circle_filled(dot.center(), 3.5, WARNING);
@@ -9188,7 +9188,7 @@ impl LanternApp {
                             .rounding(Rounding::same(8.0))
                             .inner_margin(Margin::symmetric(10.0, 8.0))
                             .show(ui, |ui| {
-                                ui.set_width(w - 4.0);
+                                ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     let dot = ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover()).0;
                                     ui.painter().circle_filled(dot.center(), 3.5, SUCCESS);
@@ -9206,26 +9206,27 @@ impl LanternApp {
                     }
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Escritorio Remoto y Shadow ───────────────────────────────
                 ui.label(RichText::new("ACCESO REMOTO RÁPIDO").size(9.5).strong().color(TEXT_DIM));
+                ui.add_space(6.0);
                 if is_protected_self {
                     egui::Frame::none()
                         .fill(Color32::from_rgba_unmultiplied(248, 113, 113, 16))
                         .stroke(Stroke::new(1.0_f32, DANGER))
                         .rounding(Rounding::same(8.0))
-                        .inner_margin(Margin::symmetric(12.0, 10.0))
+                        .inner_margin(Margin::symmetric(10.0, 8.0))
                         .show(ui, |ui| {
-                            ui.set_width(w - 4.0);
+                            ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("🚫").size(18.0));
                                 ui.add_space(6.0);
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("Acceso remoto deshabilitado para este equipo").size(11.5).strong().color(DANGER));
-                                    ui.label(RichText::new("La IP 10.35.12.5 es tu máquina local. Se han bloqueado RDP, Shadow y Consola.").size(10.0).color(TEXT_PRI));
+                                    ui.label(RichText::new("Acceso remoto deshabilitado para este equipo").size(11.0).strong().color(DANGER));
+                                    ui.label(RichText::new("La IP 10.35.12.5 es tu máquina local.").size(9.5).color(TEXT_PRI));
                                 });
                             });
                         });
@@ -9278,9 +9279,9 @@ impl LanternApp {
                     }
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Mensajería de Red y Notificaciones Directas ──────────────
                 ui.label(RichText::new("MENSAJERÍA DE RED Y NOTIFICACIONES").size(9.5).strong().color(TEXT_DIM));
@@ -9289,18 +9290,18 @@ impl LanternApp {
                     .fill(Color32::from_rgba_unmultiplied(56, 189, 248, 20))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(56, 189, 248, 70)))
                     .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::symmetric(14.0, 10.0))
+                    .inner_margin(Margin::symmetric(12.0, 9.0))
                     .show(ui, |ui| {
-                        ui.set_width(w - 4.0);
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("💬").size(22.0));
-                            ui.add_space(8.0);
+                            ui.label(RichText::new("💬").size(20.0));
+                            ui.add_space(6.0);
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("Enviar Mensaje de Texto a Pantalla").size(12.5).strong().color(ACCENT));
-                                ui.label(RichText::new("Notificación emergente a usuarios activos en este equipo").size(10.0).color(TEXT_SEC));
+                                ui.label(RichText::new("Enviar Mensaje de Texto a Pantalla").size(12.0).strong().color(ACCENT));
+                                ui.label(RichText::new("Notificación emergente a usuarios activos en este equipo").size(9.5).color(TEXT_SEC));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new("Redactar ➜").size(11.0).strong().color(ACCENT));
+                                ui.label(RichText::new("Redactar ➜").size(10.5).strong().color(ACCENT));
                             });
                         });
                     });
@@ -9311,9 +9312,9 @@ impl LanternApp {
                     self.open_send_message_modal(&device.hostname, &device.ip, sel_user, sessions);
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Despliegue de Microsoft Office (MSOI) ───────────────────
                 ui.label(RichText::new("DESPLIEGUE DE SOFTWARE").size(9.5).strong().color(TEXT_DIM));
@@ -9322,18 +9323,18 @@ impl LanternApp {
                     .fill(Color32::from_rgba_unmultiplied(234, 88, 12, 35))
                     .stroke(Stroke::new(1.2_f32, Color32::from_rgb(251, 146, 60)))
                     .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::symmetric(14.0, 10.0))
+                    .inner_margin(Margin::symmetric(12.0, 9.0))
                     .show(ui, |ui| {
-                        ui.set_width(w - 4.0);
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("📦").size(22.0));
-                            ui.add_space(8.0);
+                            ui.label(RichText::new("📦").size(20.0));
+                            ui.add_space(6.0);
                             ui.vertical(|ui| {
-                                ui.label(RichText::new("Instalar Microsoft Office (MSOI)").size(12.5).strong().color(Color32::from_rgb(251, 146, 60)));
-                                ui.label(RichText::new("Office 2024/2021/2019/2016 vía PowerShell").size(10.0).color(TEXT_SEC));
+                                ui.label(RichText::new("Instalar Microsoft Office (MSOI)").size(12.0).strong().color(Color32::from_rgb(251, 146, 60)));
+                                ui.label(RichText::new("Office 2024/2021/2019/2016 vía PowerShell").size(9.5).color(TEXT_SEC));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new("Abrir ➜").size(11.0).strong().color(Color32::from_rgb(251, 146, 60)));
+                                ui.label(RichText::new("Abrir ➜").size(10.5).strong().color(Color32::from_rgb(251, 146, 60)));
                             });
                         });
                     });
@@ -9341,9 +9342,9 @@ impl LanternApp {
                     self.open_msoi_modal(&device.hostname, &device.ip);
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Iniciar Sesión con Credenciales (Sin Sesión Previa) ───────
                 ui.horizontal(|ui| {
@@ -9364,7 +9365,8 @@ impl LanternApp {
                         .rounding(Rounding::same(8.0))
                         .inner_margin(Margin::same(10.0))
                         .show(ui, |ui| {
-                            ui.set_width(w - 4.0);
+                            let cred_w = ui.available_width();
+                            ui.set_width(cred_w);
 
                             ui.label(RichText::new("Usuario (ej. .\\Administrador o DOMINIO\\usuario):").size(10.0).color(TEXT_DIM));
                             ui.add_space(3.0);
@@ -9373,18 +9375,22 @@ impl LanternApp {
                                     .hint_text("Usuario de Windows...")
                                     .font(FontId::monospace(11.0))
                                     .margin(Margin::symmetric(8.0, 5.0))
+                                    .desired_width(cred_w)
                             );
                             ui.add_space(6.0);
 
                             ui.label(RichText::new("Contraseña:").size(10.0).color(TEXT_DIM));
                             ui.add_space(3.0);
                             ui.horizontal(|ui| {
+                                let eye_btn_w = 68.0;
+                                let pwd_input_w = (ui.available_width() - eye_btn_w - 6.0).max(100.0);
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.cred_password)
                                         .password(!self.cred_show_password)
                                         .hint_text("••••••••")
                                         .font(FontId::monospace(11.0))
                                         .margin(Margin::symmetric(8.0, 5.0))
+                                        .desired_width(pwd_input_w)
                                 );
                                 let eye = if self.cred_show_password { "👁 Ocultar" } else { "👁 Ver" };
                                 if ui.add(
@@ -9420,9 +9426,9 @@ impl LanternApp {
                         });
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
                 divider(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
                 // ── Control del Agente Lili enterprise NET ────────────────────
                 ui.label(RichText::new("CONTROL DEL AGENTE LILI ENTERPRISE NET").size(9.5).strong().color(TEXT_DIM));
@@ -11412,8 +11418,10 @@ impl eframe::App for LanternApp {
         // Inspector lateral derecho (solo si hay un nodo seleccionado)
         if self.selected_device.is_some() {
             egui::SidePanel::right("detail_panel")
-                .exact_width(DETAIL_W)
-                .resizable(false)
+                .default_width(DETAIL_W)
+                .min_width(380.0)
+                .max_width(700.0)
+                .resizable(true)
                 .frame(egui::Frame::none().fill(SURFACE).inner_margin(Margin::ZERO))
                 .show(ctx, |ui| {
                     let r = ui.max_rect();
@@ -11426,7 +11434,8 @@ impl eframe::App for LanternApp {
                         .id_salt("detail_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            ui.set_width(DETAIL_W);
+                            let avail = ui.available_width();
+                            ui.set_width(avail);
                             ui.add_space(14.0);
 
                             // Header del inspector con botón de cierre
@@ -11799,7 +11808,8 @@ fn detail_kv(ui: &mut egui::Ui, key: &str, value: &str, _panel_w: f32) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(key).size(11.0).color(TEXT_DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).size(11.0).monospace().color(TEXT_SEC));
+            ui.add(egui::Label::new(RichText::new(value).size(11.0).monospace().color(TEXT_SEC)).truncate())
+                .on_hover_text(value);
         });
     });
     ui.add_space(5.0);
