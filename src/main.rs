@@ -857,6 +857,8 @@ struct LanternApp {
 
     // Modal de Envío de Mensaje de Texto a Pantalla Remota
     msg_show_modal: bool,
+    msg_broadcast_mode: bool,
+    msg_broadcast_online_only: bool,
     msg_target_host: String,
     msg_target_ip: String,
     msg_target_session: String,
@@ -1109,6 +1111,8 @@ impl Default for LanternApp {
             msoi_receiver: None,
             logo_texture: None,
             msg_show_modal: false,
+            msg_broadcast_mode: false,
+            msg_broadcast_online_only: true,
             msg_target_host: String::new(),
             msg_target_ip: String::new(),
             msg_target_session: "*".to_string(),
@@ -8658,6 +8662,16 @@ impl LanternApp {
                 ui.add_space(3.0);
             }
 
+            ui.add_space(8.0);
+            let bcast_btn = egui::Button::new(
+                RichText::new("📢 Mensaje Masivo").size(11.0).strong().color(BASE)
+            )
+            .fill(Color32::from_rgb(2, 132, 199))
+            .rounding(Rounding::same(5.0));
+            if ui.add(bcast_btn).on_hover_text("Enviar notificación emergente de texto a todos los equipos encendidos en la red").clicked() {
+                self.open_broadcast_message_modal();
+            }
+
             // Buscador a la derecha
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !self.search.is_empty() {
@@ -10997,6 +11011,7 @@ if ($isLocal) {{
         default_session: Option<&str>,
         detected_sessions: Vec<String>,
     ) {
+        self.msg_broadcast_mode = false;
         self.msg_target_host = hostname.to_string();
         self.msg_target_ip = ip.to_string();
         self.msg_target_session = default_session.unwrap_or("*").to_string();
@@ -11010,6 +11025,24 @@ if ($isLocal) {{
 
         let display = if hostname.is_empty() || hostname.starts_with("host-") { ip } else { hostname };
         self.notify(&format!("Redactando mensaje para {}", display), ACCENT);
+    }
+
+    fn open_broadcast_message_modal(&mut self) {
+        self.msg_broadcast_mode = true;
+        self.msg_broadcast_online_only = true;
+        self.msg_target_host.clear();
+        self.msg_target_ip.clear();
+        self.msg_target_session = "*".to_string();
+        self.msg_detected_sessions.clear();
+        if self.msg_title.trim().is_empty() {
+            self.msg_title = "Soporte TI — Lili enterprise NET".to_string();
+        }
+        self.msg_status_msg = None;
+        self.msg_sending = false;
+        self.msg_show_modal = true;
+
+        let count = self.devices.iter().filter(|d| d.status == "ENCENDIDO" && !is_self_or_protected_host(&d.ip, &d.hostname)).count();
+        self.notify(&format!("Redactando mensaje masivo para {} equipos encendidos", count), WARNING);
     }
 
     fn poll_send_message(&mut self) {
@@ -11044,36 +11077,118 @@ if ($isLocal) {{
         self.msg_sending = true;
         self.msg_status_msg = None;
 
-        let host = self.msg_target_host.clone();
-        let ip = self.msg_target_ip.clone();
-        let target = if host.starts_with("host-") || host.is_empty() {
-            ip.clone()
-        } else {
-            host.clone()
-        };
-        let session = if self.msg_target_session.trim().is_empty() {
-            "*".to_string()
-        } else {
-            self.msg_target_session.trim().to_string()
-        };
         let title = self.msg_title.trim().to_string();
         let body = self.msg_body.trim().to_string();
         let timeout = self.msg_timeout_secs;
-
         let preview = body.lines().next().unwrap_or("").to_string();
-        self.add_log(
-            "Mensajería",
-            &format!("Transmitiendo mensaje a {} (sesión {}): \"{}\"", target, session, preview),
-            ACCENT,
-        );
 
-        let (tx, rx) = mpsc::channel();
-        self.msg_receiver = Some(rx);
+        if self.msg_broadcast_mode {
+            let online_only = self.msg_broadcast_online_only;
+            let targets: Vec<(String, String)> = self.devices
+                .iter()
+                .filter(|d| {
+                    if is_self_or_protected_host(&d.ip, &d.hostname) {
+                        return false;
+                    }
+                    if online_only {
+                        d.status == "ENCENDIDO"
+                    } else {
+                        true
+                    }
+                })
+                .map(|d| (d.hostname.clone(), d.ip.clone()))
+                .collect();
 
-        thread::spawn(move || {
-            let res = send_text_message_remote_sync(&target, &session, timeout, &title, &body);
-            let _ = tx.send(res);
-        });
+            if targets.is_empty() {
+                self.msg_sending = false;
+                let err_msg = "No hay equipos de red disponibles para enviar el mensaje".to_string();
+                self.msg_status_msg = Some((err_msg.clone(), DANGER));
+                self.notify(&err_msg, DANGER);
+                return;
+            }
+
+            let total_targets = targets.len();
+            self.add_log(
+                "Mensajería",
+                &format!("Iniciando difusión masiva a {} equipos: \"{}\"", total_targets, preview),
+                WARNING,
+            );
+
+            let (tx, rx) = mpsc::channel();
+            self.msg_receiver = Some(rx);
+
+            thread::spawn(move || {
+                let chunk_size = 12;
+                let mut ok_cnt = 0;
+                let mut fail_cnt = 0;
+
+                for chunk in targets.chunks(chunk_size) {
+                    let mut handles = Vec::new();
+                    for (host, ip) in chunk {
+                        let target = if host.starts_with("host-") || host.is_empty() {
+                            ip.clone()
+                        } else {
+                            host.clone()
+                        };
+                        let t_title = title.clone();
+                        let t_body = body.clone();
+                        handles.push(thread::spawn(move || {
+                            let res = send_text_message_remote_sync(&target, "*", timeout, &t_title, &t_body);
+                            (target, res.is_ok())
+                        }));
+                    }
+                    for h in handles {
+                        if let Ok((_target, ok)) = h.join() {
+                            if ok {
+                                ok_cnt += 1;
+                            } else {
+                                fail_cnt += 1;
+                            }
+                        }
+                    }
+                }
+
+                let final_res = if ok_cnt > 0 {
+                    Ok(format!(
+                        "Difusión masiva completada: {} de {} equipos recibieron el mensaje ({} con fallo o sin respuesta)",
+                        ok_cnt, total_targets, fail_cnt
+                    ))
+                } else {
+                    Err(format!(
+                        "No se pudo entregar el mensaje a ninguno de los {} equipos seleccionados",
+                        total_targets
+                    ))
+                };
+                let _ = tx.send(final_res);
+            });
+        } else {
+            let host = self.msg_target_host.clone();
+            let ip = self.msg_target_ip.clone();
+            let target = if host.starts_with("host-") || host.is_empty() {
+                ip.clone()
+            } else {
+                host.clone()
+            };
+            let session = if self.msg_target_session.trim().is_empty() {
+                "*".to_string()
+            } else {
+                self.msg_target_session.trim().to_string()
+            };
+
+            self.add_log(
+                "Mensajería",
+                &format!("Transmitiendo mensaje a {} (sesión {}): \"{}\"", target, session, preview),
+                ACCENT,
+            );
+
+            let (tx, rx) = mpsc::channel();
+            self.msg_receiver = Some(rx);
+
+            thread::spawn(move || {
+                let res = send_text_message_remote_sync(&target, &session, timeout, &title, &body);
+                let _ = tx.send(res);
+            });
+        }
     }
 
     fn ui_send_message_modal(&mut self, ctx: &egui::Context) {
@@ -11095,18 +11210,31 @@ if ($isLocal) {{
         let mut close = false;
         let mut trigger_send = false;
 
-        let target_display = if self.msg_target_host.is_empty() || self.msg_target_host.starts_with("host-") {
+        let online_count = self.devices.iter().filter(|d| d.status == "ENCENDIDO" && !is_self_or_protected_host(&d.ip, &d.hostname)).count();
+        let total_count = self.devices.iter().filter(|d| !is_self_or_protected_host(&d.ip, &d.hostname)).count();
+
+        let has_individual_target = !self.msg_target_ip.is_empty();
+        let target_display = if self.msg_broadcast_mode {
+            let n = if self.msg_broadcast_online_only { online_count } else { total_count };
+            format!("Toda la Red ({} equipos{})", n, if self.msg_broadcast_online_only { " encendidos" } else { " descubiertos" })
+        } else if self.msg_target_host.is_empty() || self.msg_target_host.starts_with("host-") {
             self.msg_target_ip.clone()
         } else {
             format!("{} ({})", self.msg_target_host, self.msg_target_ip)
         };
 
-        egui::Window::new("💬 Enviar Mensaje de Texto a Pantalla Remota")
+        let modal_title = if self.msg_broadcast_mode {
+            "📢 Difusión Masiva de Mensaje a Toda la Red"
+        } else {
+            "💬 Enviar Mensaje de Texto a Pantalla Remota"
+        };
+
+        egui::Window::new(modal_title)
             .id(egui::Id::new("msg_modal_dialog_box"))
             .collapsible(false)
             .resizable(false)
             .order(egui::Order::Foreground)
-            .default_size(Vec2::new(600.0, 530.0))
+            .default_size(Vec2::new(620.0, 560.0))
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .frame(
                 egui::Frame::none()
@@ -11118,64 +11246,135 @@ if ($isLocal) {{
             .show(ctx, |ui| {
                 // Header
                 ui.horizontal(|ui| {
+                    let (icon, icon_col, icon_bg) = if self.msg_broadcast_mode {
+                        ("📢", WARNING, Color32::from_rgba_unmultiplied(251, 191, 36, 25))
+                    } else {
+                        ("💬", ACCENT, Color32::from_rgba_unmultiplied(56, 189, 248, 25))
+                    };
                     let icon_box = egui::Frame::none()
-                        .fill(Color32::from_rgba_unmultiplied(56, 189, 248, 25))
-                        .stroke(Stroke::new(1.0_f32, ACCENT))
+                        .fill(icon_bg)
+                        .stroke(Stroke::new(1.0_f32, icon_col))
                         .rounding(Rounding::same(8.0))
                         .inner_margin(Margin::same(10.0));
                     icon_box.show(ui, |ui| {
-                        ui.label(RichText::new("💬").size(24.0));
+                        ui.label(RichText::new(icon).size(24.0));
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Mensajería Directa a Pantalla de Equipo").size(15.0).strong().color(TEXT_PRI));
+                        let header_title = if self.msg_broadcast_mode {
+                            "Difusión Masiva a Equipos de la Red"
+                        } else {
+                            "Mensajería Directa a Pantalla de Equipo"
+                        };
+                        ui.label(RichText::new(header_title).size(15.0).strong().color(TEXT_PRI));
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Equipo destino:").size(11.0).color(TEXT_DIM));
-                            ui.label(RichText::new(&target_display).size(11.5).strong().color(ACCENT));
+                            ui.label(RichText::new("Alcance / Destino:").size(11.0).color(TEXT_DIM));
+                            ui.label(RichText::new(&target_display).size(11.5).strong().color(if self.msg_broadcast_mode { WARNING } else { ACCENT }));
                         });
                     });
                 });
 
-                ui.add_space(12.0);
-                divider(ui);
                 ui.add_space(10.0);
+                divider(ui);
+                ui.add_space(8.0);
 
-                // Sección 1: Destinatario / Sesión
-                ui.label(RichText::new("1. DESTINATARIO / SESIÓN").size(10.0).strong().color(TEXT_DIM));
+                // Selector de Modo: Individual vs Broadcast
+                ui.label(RichText::new("1. ALCANCE DE TRANSMISIÓN").size(10.0).strong().color(TEXT_DIM));
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    let all_active = self.msg_target_session == "*";
-                    let btn_all = egui::Button::new(
-                        RichText::new("🌐 Todas las sesiones activas (*)")
+                ui.horizontal(|ui| {
+                    if has_individual_target {
+                        let single_active = !self.msg_broadcast_mode;
+                        let btn_single = egui::Button::new(
+                            RichText::new(format!("🎯 Solo a este equipo ({})", self.msg_target_ip))
+                                .size(11.0)
+                                .color(if single_active { BASE } else { TEXT_PRI })
+                        )
+                        .fill(if single_active { ACCENT } else { SURFACE_2 })
+                        .rounding(Rounding::same(6.0));
+                        if ui.add(btn_single).clicked() {
+                            self.msg_broadcast_mode = false;
+                        }
+                        ui.add_space(6.0);
+                    }
+
+                    let bcast_active = self.msg_broadcast_mode;
+                    let btn_bcast = egui::Button::new(
+                        RichText::new(format!("📢 Toda la Red ({} equipos)", online_count))
                             .size(11.0)
                             .strong()
-                            .color(if all_active { BASE } else { TEXT_PRI })
+                            .color(if bcast_active { BASE } else { TEXT_PRI })
                     )
-                    .fill(if all_active { ACCENT } else { SURFACE_2 })
+                    .fill(if bcast_active { WARNING } else { SURFACE_2 })
                     .rounding(Rounding::same(6.0));
-                    if ui.add(btn_all).clicked() {
-                        self.msg_target_session = "*".to_string();
+                    if ui.add(btn_bcast).clicked() {
+                        self.msg_broadcast_mode = true;
                     }
+                });
 
-                    for sess in &self.msg_detected_sessions {
-                        let active = self.msg_target_session == *sess;
-                        let btn_s = egui::Button::new(
-                            RichText::new(format!("👤 {}", sess))
+                ui.add_space(6.0);
+
+                if self.msg_broadcast_mode {
+                    // Opciones de Broadcast
+                    egui::Frame::none()
+                        .fill(Color32::from_rgba_unmultiplied(251, 191, 36, 15))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(251, 191, 36, 60)))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::symmetric(12.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Filtro de equipos:").size(10.5).color(TEXT_DIM));
+                                ui.add_space(4.0);
+                                if ui.selectable_label(self.msg_broadcast_online_only, format!("🟢 Solo encendidos ({})", online_count)).clicked() {
+                                    self.msg_broadcast_online_only = true;
+                                }
+                                ui.add_space(4.0);
+                                if ui.selectable_label(!self.msg_broadcast_online_only, format!("🌐 Todos descubiertos ({})", total_count)).clicked() {
+                                    self.msg_broadcast_online_only = false;
+                                }
+                            });
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("🛡️ Tu equipo de consola local (10.35.12.5) está protegido y se omite automáticamente de la difusión.")
+                                    .size(9.5)
+                                    .color(TEXT_SEC)
+                            );
+                        });
+                } else {
+                    // Opciones de Sesión Individual
+                    ui.horizontal_wrapped(|ui| {
+                        let all_active = self.msg_target_session == "*";
+                        let btn_all = egui::Button::new(
+                            RichText::new("🌐 Todas las sesiones activas (*)")
                                 .size(11.0)
-                                .color(if active { BASE } else { TEXT_SEC })
+                                .strong()
+                                .color(if all_active { BASE } else { TEXT_PRI })
                         )
-                        .fill(if active { PURPLE } else { SURFACE_2 })
+                        .fill(if all_active { ACCENT } else { SURFACE_2 })
                         .rounding(Rounding::same(6.0));
-                        if ui.add(btn_s).clicked() {
-                            self.msg_target_session = sess.clone();
+                        if ui.add(btn_all).clicked() {
+                            self.msg_target_session = "*".to_string();
                         }
-                    }
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Sesión manual:").size(10.0).color(TEXT_DIM));
-                    custom_text_input(ui, &mut self.msg_target_session, "* o ID sesión o usuario", 180.0);
-                });
+
+                        for sess in &self.msg_detected_sessions {
+                            let active = self.msg_target_session == *sess;
+                            let btn_s = egui::Button::new(
+                                RichText::new(format!("👤 {}", sess))
+                                    .size(11.0)
+                                    .color(if active { BASE } else { TEXT_SEC })
+                            )
+                            .fill(if active { PURPLE } else { SURFACE_2 })
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(btn_s).clicked() {
+                                self.msg_target_session = sess.clone();
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sesión manual:").size(10.0).color(TEXT_DIM));
+                        custom_text_input(ui, &mut self.msg_target_session, "* o ID sesión o usuario", 180.0);
+                    });
+                }
 
                 ui.add_space(10.0);
                 divider(ui);
@@ -11221,6 +11420,7 @@ if ($isLocal) {{
                     let presets = [
                         ("⚠️ Mantenimiento 5m", "Mantenimiento preventivo de TI en 5 minutos. Por favor guarde su trabajo y cierre sus aplicaciones."),
                         ("🔄 Reinicio necesario", "Se requiere reiniciar este equipo para aplicar actualizaciones críticas del sistema. Guarde sus archivos."),
+                        ("📢 Aviso General de Red", "Aviso de TI: se realizarán labores de mantenimiento en la infraestructura de red. Guarde sus cambios."),
                         ("📞 Contactar a TI", "Por favor comuníquese con el departamento de Sistemas / TI a la extensión de soporte."),
                         ("🛠️ Asistencia técnica", "El equipo de soporte técnico iniciará una sesión de asistencia en este equipo en unos instantes."),
                         ("🔒 Cierre de sesión", "Su sesión en este equipo será finalizada en breve por directivas de seguridad corporativa."),
@@ -11276,7 +11476,12 @@ if ($isLocal) {{
                             ui.horizontal(|ui| {
                                 ui.spinner();
                                 ui.add_space(6.0);
-                                ui.label(RichText::new("Transmitiendo mensaje al equipo remoto mediante WinRM y RPC de Windows...").size(11.0).color(ACCENT));
+                                let spin_text = if self.msg_broadcast_mode {
+                                    format!("Transmitiendo difusión simultánea a los equipos de la red en paralelo...")
+                                } else {
+                                    "Transmitiendo mensaje al equipo remoto mediante WinRM y RPC de Windows...".to_string()
+                                };
+                                ui.label(RichText::new(spin_text).size(11.0).color(ACCENT));
                             });
                         });
                 } else if let Some((msg, col)) = &self.msg_status_msg {
@@ -11313,12 +11518,19 @@ if ($isLocal) {{
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_send = !self.msg_sending && !self.msg_body.trim().is_empty();
+                        let btn_label = if self.msg_broadcast_mode {
+                            let n = if self.msg_broadcast_online_only { online_count } else { total_count };
+                            format!("📢 Enviar Difusión a Toda la Red ({} equipos)", n)
+                        } else {
+                            "🚀 Enviar Mensaje a Pantalla".to_string()
+                        };
+                        let btn_bg = if !can_send { SURFACE_3 } else if self.msg_broadcast_mode { WARNING } else { ACCENT };
                         let send_btn = egui::Button::new(
-                            RichText::new("🚀 Enviar Mensaje a Pantalla").size(12.0).strong().color(if can_send { BASE } else { TEXT_DIM })
+                            RichText::new(btn_label).size(12.0).strong().color(if can_send { BASE } else { TEXT_DIM })
                         )
-                        .fill(if can_send { ACCENT } else { SURFACE_3 })
+                        .fill(btn_bg)
                         .rounding(Rounding::same(6.0))
-                        .min_size(Vec2::new(220.0, 32.0));
+                        .min_size(Vec2::new(230.0, 32.0));
 
                         if ui.add_enabled(can_send, send_btn).clicked() {
                             trigger_send = true;
