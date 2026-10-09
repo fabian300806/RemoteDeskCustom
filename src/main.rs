@@ -11084,7 +11084,13 @@ if ($isLocal) {{
 
         if self.msg_broadcast_mode {
             let online_only = self.msg_broadcast_online_only;
-            let targets: Vec<(String, String)> = self.devices
+            struct BcastItem {
+                ip: String,
+                host: String,
+                sessions: Vec<String>,
+                ports: Vec<u16>,
+            }
+            let targets: Vec<BcastItem> = self.devices
                 .iter()
                 .filter(|d| {
                     if is_self_or_protected_host(&d.ip, &d.hostname) {
@@ -11096,7 +11102,12 @@ if ($isLocal) {{
                         true
                     }
                 })
-                .map(|d| (d.hostname.clone(), d.ip.clone()))
+                .map(|d| BcastItem {
+                    ip: d.ip.clone(),
+                    host: d.hostname.clone(),
+                    sessions: d.sessions.iter().map(|s| s.username.clone()).collect(),
+                    ports: d.ports.clone(),
+                })
                 .collect();
 
             if targets.is_empty() {
@@ -11110,7 +11121,7 @@ if ($isLocal) {{
             let total_targets = targets.len();
             self.add_log(
                 "Mensajería",
-                &format!("Iniciando difusión masiva a {} equipos: \"{}\"", total_targets, preview),
+                &format!("Iniciando difusión masiva paralela a {} equipos: \"{}\"", total_targets, preview),
                 WARNING,
             );
 
@@ -11118,27 +11129,35 @@ if ($isLocal) {{
             self.msg_receiver = Some(rx);
 
             thread::spawn(move || {
-                let chunk_size = 12;
+                let chunk_size = 24;
                 let mut ok_cnt = 0;
                 let mut fail_cnt = 0;
 
                 for chunk in targets.chunks(chunk_size) {
                     let mut handles = Vec::new();
-                    for (host, ip) in chunk {
-                        let target = if host.starts_with("host-") || host.is_empty() {
-                            ip.clone()
-                        } else {
-                            host.clone()
-                        };
+                    for item in chunk {
+                        let ip = item.ip.clone();
+                        let host = item.host.clone();
+                        let sess = item.sessions.clone();
+                        let ports = item.ports.clone();
                         let t_title = title.clone();
                         let t_body = body.clone();
                         handles.push(thread::spawn(move || {
-                            let res = send_text_message_remote_sync(&target, "*", timeout, &t_title, &t_body);
-                            (target, res.is_ok())
+                            let res = send_text_message_target_full(
+                                &ip,
+                                &host,
+                                "*",
+                                &sess,
+                                &ports,
+                                timeout,
+                                &t_title,
+                                &t_body,
+                            );
+                            (ip, res.is_ok())
                         }));
                     }
                     for h in handles {
-                        if let Ok((_target, ok)) = h.join() {
+                        if let Ok((_ip, ok)) = h.join() {
                             if ok {
                                 ok_cnt += 1;
                             } else {
@@ -11150,12 +11169,12 @@ if ($isLocal) {{
 
                 let final_res = if ok_cnt > 0 {
                     Ok(format!(
-                        "Difusión masiva completada: {} de {} equipos recibieron el mensaje ({} con fallo o sin respuesta)",
+                        "Difusión completada con éxito: {} de {} equipos recibieron el mensaje emergente en pantalla ({} sin respuesta RPC)",
                         ok_cnt, total_targets, fail_cnt
                     ))
                 } else {
                     Err(format!(
-                        "No se pudo entregar el mensaje a ninguno de los {} equipos seleccionados",
+                        "No se pudo entregar el mensaje a los {} equipos examinados (sin soporte RPC o WinRM activo)",
                         total_targets
                     ))
                 };
@@ -11164,20 +11183,17 @@ if ($isLocal) {{
         } else {
             let host = self.msg_target_host.clone();
             let ip = self.msg_target_ip.clone();
-            let target = if host.starts_with("host-") || host.is_empty() {
-                ip.clone()
-            } else {
-                host.clone()
-            };
             let session = if self.msg_target_session.trim().is_empty() {
                 "*".to_string()
             } else {
                 self.msg_target_session.trim().to_string()
             };
+            let detected = self.msg_detected_sessions.clone();
+            let target_display = if host.starts_with("host-") || host.is_empty() { ip.clone() } else { host.clone() };
 
             self.add_log(
                 "Mensajería",
-                &format!("Transmitiendo mensaje a {} (sesión {}): \"{}\"", target, session, preview),
+                &format!("Transmitiendo mensaje a {} (sesión {}): \"{}\"", target_display, session, preview),
                 ACCENT,
             );
 
@@ -11185,7 +11201,16 @@ if ($isLocal) {{
             self.msg_receiver = Some(rx);
 
             thread::spawn(move || {
-                let res = send_text_message_remote_sync(&target, &session, timeout, &title, &body);
+                let res = send_text_message_target_full(
+                    &ip,
+                    &host,
+                    &session,
+                    &detected,
+                    &[],
+                    timeout,
+                    &title,
+                    &body,
+                );
                 let _ = tx.send(res);
             });
         }
@@ -12212,6 +12237,182 @@ fn test_winrm_connectivity(ip: &str) -> (bool, String) {
     }
 }
 
+fn check_tcp_port_quick(ip_or_host: &str, port: u16, timeout_ms: u64) -> bool {
+    let clean = ip_or_host.trim().replace(['\'', '"', ';', '$', '`', '\\', '/'], "");
+    let target = format!("{}:{}", clean, port);
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)).is_ok()
+    } else if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&target) {
+        if let Some(addr) = addrs.next() {
+            TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)).is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+fn execute_msg_exe(server: &str, session: &str, timeout_secs: u32, message: &str) -> bool {
+    let clean_server = server.trim().replace(['\'', '"', ';', '$', '`', '\\', '/'], "");
+    let clean_session = session.trim().replace(['\'', '"', ';', '$', '`'], "");
+    let s_target = if clean_session.is_empty() { "*".to_string() } else { clean_session };
+
+    let mut cmd = Command::new("msg.exe");
+    cmd.arg(&s_target);
+    cmd.arg(format!("/server:{}", clean_server));
+    if timeout_secs > 0 {
+        cmd.arg(format!("/time:{}", timeout_secs));
+    }
+    cmd.arg(message);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            return true;
+        }
+    }
+    false
+}
+
+fn send_text_message_target_full(
+    target_ip: &str,
+    target_host: &str,
+    session_hint: &str,
+    known_sessions: &[String],
+    scanned_ports: &[u16],
+    timeout_secs: u32,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    if is_self_or_protected_host(target_ip, target_host) {
+        return Err("Equipo local de consola (10.35.12.5) omitido por protección".to_string());
+    }
+
+    let clean_ip = target_ip.trim().replace(['\'', '"', ';', '$', '`', '\\', '/'], "");
+    let clean_host = target_host.trim().replace(['\'', '"', ';', '$', '`', '\\', '/'], "");
+    let clean_hint = session_hint.trim().replace(['\'', '"', ';', '$', '`'], "");
+
+    // Si tenemos escaneo de puertos previo o hacemos check rápido TCP:
+    let known_win_ports = scanned_ports.contains(&445)
+        || scanned_ports.contains(&135)
+        || scanned_ports.contains(&3389)
+        || scanned_ports.contains(&5985);
+
+    if !known_win_ports && !scanned_ports.is_empty() {
+        // El equipo ya fue escaneado completamente y NO tiene puertos Windows abiertos
+        return Err(format!("El equipo {} no tiene puertos RPC/SMB de Windows abiertos", clean_ip));
+    }
+
+    // Pre-check rápido TCP en 445 / 135 con 250ms de timeout para no bloquear en equipos inactivos
+    let has_rpc = known_win_ports
+        || check_tcp_port_quick(&clean_ip, 445, 250)
+        || check_tcp_port_quick(&clean_ip, 135, 250)
+        || (!clean_host.is_empty() && !clean_host.starts_with("host-") && check_tcp_port_quick(&clean_host, 445, 250));
+
+    let full_message = if title.trim().is_empty() {
+        body.trim().to_string()
+    } else {
+        format!("{}\r\n\r\n{}", title.trim(), body.trim())
+    };
+
+    // Servidores a intentar (priorizar IP directa, luego Hostname DNS si aplica)
+    let mut servers_to_try = vec![clean_ip.clone()];
+    if !clean_host.is_empty() && !clean_host.starts_with("host-") && clean_host != clean_ip {
+        servers_to_try.push(clean_host.clone());
+    }
+
+    // Sesiones a intentar en orden de precisión
+    let mut sessions_to_try = Vec::new();
+    if !clean_hint.is_empty() && clean_hint != "*" {
+        sessions_to_try.push(clean_hint.clone());
+    }
+    for s in known_sessions {
+        let cs = s.trim().to_string();
+        if !cs.is_empty() && cs != "*" && !sessions_to_try.contains(&cs) {
+            sessions_to_try.push(cs);
+        }
+    }
+    if !sessions_to_try.contains(&"console".to_string()) {
+        sessions_to_try.push("console".to_string());
+    }
+    if !sessions_to_try.contains(&"*".to_string()) {
+        sessions_to_try.push("*".to_string());
+    }
+
+    // 1. INTENTO NATIVO DIRECTO ULTRA-RÁPIDO MEDIANTE MSG.EXE
+    if has_rpc {
+        for srv in &servers_to_try {
+            for sess in &sessions_to_try {
+                if execute_msg_exe(srv, sess, timeout_secs, &full_message) {
+                    return Ok(format!("Mensaje entregado exitosamente a {} en sesión {}", srv, sess));
+                }
+            }
+        }
+    }
+
+    // 2. FALLBACK A WINRM / AGENTE (Solo si el puerto 5985 está activo para no esperar timeouts largos)
+    let has_winrm = scanned_ports.contains(&5985) || check_tcp_port_quick(&clean_ip, 5985, 250);
+    if has_winrm {
+        let ps_title = title.replace('\'', "''");
+        let ps_body = body.replace('\'', "''");
+        let target_srv = if !clean_host.is_empty() && !clean_host.starts_with("host-") { &clean_host } else { &clean_ip };
+        let s_arg = if sessions_to_try.is_empty() { "*" } else { &sessions_to_try[0] };
+
+        let script = format!(
+            r#"$opt = New-PSSessionOption -OpenTimeout 2000 -OperationTimeout 3000
+try {{
+    Invoke-Command -ComputerName '{target}' -SessionOption $opt -ScriptBlock {{
+        param($s, $t, $m, $tit)
+        try {{
+            $argList = @($s)
+            if ($t -gt 0) {{ $argList += "/time:$t" }}
+            $argList += $m
+            $p = Start-Process -FilePath "msg.exe" -ArgumentList $argList -NoNewWindow -Wait -PassThru -EA SilentlyContinue
+            if ($p.ExitCode -eq 0) {{ return "OK" }}
+        }} catch {{}}
+        try {{
+            $p = 'HKLM:\Software\ILINet\Support'
+            New-Item -Path $p -Force -EA SilentlyContinue | Out-Null
+            Set-ItemProperty -Path $p -Name Action -Value 'ShowMessage' -Force -EA SilentlyContinue
+            Set-ItemProperty -Path $p -Name CommandId -Value ([guid]::NewGuid().ToString()) -Force -EA SilentlyContinue
+            Set-ItemProperty -Path $p -Name MessageText -Value $m -Force -EA SilentlyContinue
+            Set-ItemProperty -Path $p -Name MessageTitle -Value $tit -Force -EA SilentlyContinue
+            Set-ItemProperty -Path $p -Name MessageTimeout -Value $t -Force -EA SilentlyContinue
+            Set-ItemProperty -Path $p -Name RequestedAt -Value (Get-Date).ToString('o') -Force -EA SilentlyContinue
+            return "OK"
+        }} catch {{}}
+        return "FAIL"
+    }} -ArgumentList '{session}', {timeout}, '{body}', '{title}' -ErrorAction Stop
+}} catch {{
+    Write-Error $_.Exception.Message
+}}"#,
+            target = target_srv,
+            session = s_arg,
+            timeout = timeout_secs,
+            title = ps_title,
+            body = ps_body,
+        );
+
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script]);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                let out_str = String::from_utf8_lossy(&output.stdout);
+                if out_str.contains("OK") {
+                    return Ok(format!("Mensaje entregado a {} vía WinRM / Agente Lili", target_srv));
+                }
+            }
+        }
+    }
+
+    Err(format!("No se pudo entregar a {} (sin respuesta RPC en msg.exe ni WinRM)", clean_ip))
+}
+
+#[allow(dead_code)]
 fn send_text_message_remote_sync(
     target: &str,
     session: &str,
@@ -12219,107 +12420,16 @@ fn send_text_message_remote_sync(
     title: &str,
     body: &str,
 ) -> Result<String, String> {
-    let clean_target = target.replace(['\'', '"', ';', '$', '`', '\\'], "");
-    let clean_session = session.replace(['\'', '"', ';', '$', '`'], "");
-    let clean_session = if clean_session.is_empty() { "*".to_string() } else { clean_session };
-
-    let ps_title = title.replace('\'', "''");
-    let ps_body = body.replace('\'', "''");
-
-    let script = format!(
-        r#"$ErrorActionPreference = 'Stop'
-$target = '{target}'
-$session = '{session}'
-$timeout = {timeout}
-$title = '{title}'
-$body = '{body}'
-$delivered = $false
-$errList = @()
-
-# 1. Intentar Invoke-Command vía WinRM (ejecución local de msg.exe dentro del equipo)
-try {{
-    $res = Invoke-Command -ComputerName $target -ScriptBlock {{
-        param($s, $t, $m, $tit)
-        $innerOk = $false
-        try {{
-            $argList = @($s)
-            if ($t -gt 0) {{ $argList += "/time:$t" }}
-            $argList += $m
-            $p = Start-Process -FilePath "msg.exe" -ArgumentList $argList -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
-            if ($p.ExitCode -eq 0) {{ $innerOk = $true }}
-        }} catch {{}}
-
-        # También registrar en el agente Lili Support Agent (ambas ramas HKLM)
-        try {{
-            $paths = @('HKLM:\Software\ILINet\Support', 'HKLM:\Software\Lantern\Support')
-            foreach ($p in $paths) {{
-                New-Item -Path $p -Force -EA SilentlyContinue | Out-Null
-                Set-ItemProperty -Path $p -Name Action -Value 'ShowMessage' -Force -EA SilentlyContinue
-                Set-ItemProperty -Path $p -Name CommandId -Value ([guid]::NewGuid().ToString()) -Force -EA SilentlyContinue
-                Set-ItemProperty -Path $p -Name MessageText -Value $m -Force -EA SilentlyContinue
-                Set-ItemProperty -Path $p -Name MessageTitle -Value $tit -Force -EA SilentlyContinue
-                Set-ItemProperty -Path $p -Name MessageTimeout -Value $t -Force -EA SilentlyContinue
-                Set-ItemProperty -Path $p -Name RequestedAt -Value (Get-Date).ToString('o') -Force -EA SilentlyContinue
-            }}
-            $innerOk = $true
-        }} catch {{}}
-        return $innerOk
-    }} -ArgumentList $session, $timeout, $body, $title -ErrorAction Stop
-    $delivered = $true
-}} catch {{
-    $errList += "WinRM: $($_.Exception.Message)"
-}}
-
-# 2. Si WinRM falló, intentar msg.exe directo vía RPC Terminal Services
-if (-not $delivered) {{
-    try {{
-        $argList = @($session, "/server:$target")
-        if ($timeout -gt 0) {{ $argList += "/time:$timeout" }}
-        $argList += $body
-        $p = Start-Process -FilePath "msg.exe" -ArgumentList $argList -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
-        if ($p.ExitCode -eq 0) {{
-            $delivered = $true
-        }} else {{
-            $errList += "msg.exe directo falló con código $($p.ExitCode)"
-        }}
-    }} catch {{
-        $errList += "msg.exe error: $($_.Exception.Message)"
-    }}
-}}
-
-if ($delivered) {{
-    Write-Output "EXITO"
-}} else {{
-    Write-Error ($errList -join " | ")
-}}
-"#,
-        target = clean_target,
-        session = clean_session,
-        timeout = timeout_secs,
-        title = ps_title,
-        body = ps_body,
-    );
-
-    let mut cmd = Command::new("powershell.exe");
-    cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script]);
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-
-    let output = cmd.output().map_err(|e| format!("Fallo al ejecutar PowerShell: {}", e))?;
-    if output.status.success() {
-        Ok(format!("Mensaje de texto transmitido exitosamente a {}", clean_target))
-    } else {
-        let err_text = String::from_utf8_lossy(&output.stderr);
-        let out_text = String::from_utf8_lossy(&output.stdout);
-        let detail = if !err_text.trim().is_empty() {
-            err_text.trim().to_string()
-        } else if !out_text.trim().is_empty() {
-            out_text.trim().to_string()
-        } else {
-            format!("No se pudo contactar a {} vía WinRM ni RPC (msg.exe)", clean_target)
-        };
-        Err(detail)
-    }
+    send_text_message_target_full(
+        target,
+        target,
+        session,
+        &[],
+        &[],
+        timeout_secs,
+        title,
+        body,
+    )
 }
 
 #[cfg(windows)]
